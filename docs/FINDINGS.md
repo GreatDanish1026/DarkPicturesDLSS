@@ -233,6 +233,9 @@ sizes):
   corruption: DLSS is reset only on the cut frame, then fed previous-shot velocities.
   Proposed guard: camera-only motion for a few frames after a reset, plus a reset on the
   frame after the cut.
+- **0.5.7 adds the guard:** DLSS InReset on the cut frame and the next one, and
+  camera-only motion for 4 frames after any reset (game cut flag, camera jump or feature
+  switch).
 
 ### Crash report from a probe 0.3.1 session
 

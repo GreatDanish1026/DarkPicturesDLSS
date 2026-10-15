@@ -96,6 +96,8 @@ std::unordered_map<uint64_t, resource_view> g_srvs;  // game texture -> our SRV 
 
 std::string g_status = "waiting for the game's TAAU pass";
 uint64_t g_done = 0, g_failures = 0;
+constexpr uint32_t kCameraOnlyFrames = 4;  // after a reset, see Evaluate
+uint32_t g_framesSinceReset = 1000;
 
 void SetStatus(const char* fmt, ...) {
     char buf[256];
@@ -392,6 +394,16 @@ Result Evaluate(const Frame& f) {
     // A feature last used shots ago holds stale history: start it fresh.
     const bool switched = feature != g_lastFeature;
 
+    // After a cut the game's velocity buffer still describes the previous shot for a
+    // frame or two (measured: 34-43 px decoded vs 3 px camera motion, up to 298 px), and
+    // DLSS would reproject its fresh history with it. So reset on the cut frame and the
+    // next one, and use camera-only motion (ClipToPrevClip is right at a cut) for
+    // kCameraOnlyFrames frames.
+    if (f.reset || switched) g_framesSinceReset = 0;
+    const bool reset = g_framesSinceReset <= 1;
+    const bool cameraOnly = g_options.ignoreVelocity || g_framesSinceReset < kCameraOnlyFrames;
+    if (g_framesSinceReset < 1000) ++g_framesSinceReset;
+
     // Our textures match the game's render-target size; only the render rect is used.
     const resource_desc velocityDesc = dev->get_resource_desc(f.velocity);
     if (!EnsureTextures(dev, velocityDesc.texture.width, velocityDesc.texture.height)) return Result::skipped;
@@ -411,7 +423,7 @@ Result Evaluate(const Frame& f) {
     constants[17] = float(f.renderH);
     constants[18] = 1.0f / float(f.renderW);
     constants[19] = 1.0f / float(f.renderH);
-    constants[20] = g_options.ignoreVelocity ? 1.0f : 0.0f;
+    constants[20] = cameraOnly ? 1.0f : 0.0f;
     constants[21] = constants[22] = constants[23] = 0.0f;
     // Diagnostics slot for this frame: read what it held kStatsRing frames ago, clear it.
     const uint32_t slot = static_cast<uint32_t>(g_statsFrame++ % kStatsRing);
@@ -450,7 +462,7 @@ Result Evaluate(const Frame& f) {
     e.InJitterOffsetX = g_options.flipJitterX ? -f.jitterX : f.jitterX;
     e.InJitterOffsetY = g_options.flipJitterY ? -f.jitterY : f.jitterY;
     e.InRenderSubrectDimensions = {f.renderW, f.renderH};
-    e.InReset = (f.reset || switched) ? 1 : 0;
+    e.InReset = reset ? 1 : 0;
     e.InMVScaleX = g_options.invertMotion ? -1.0f : 1.0f;
     e.InMVScaleY = g_options.invertMotion ? -1.0f : 1.0f;
     e.InOutputSubrectBase = {f.outX, f.outY};
