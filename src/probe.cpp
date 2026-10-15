@@ -1401,6 +1401,53 @@ void ApplyRenderScale() {
     g_forcing = true;
 }
 
+// Test switches for effects that read the previous frame's TAA output (= DLSS output)
+// back into this frame's lighting: UE 4.26 SSGI (enabled by NativeSSGI_P.pak) and SSR
+// (quality 4 from BetterReflections_P.pak). That loop has no history clamp under DLSS.
+struct IntOverride {
+    const wchar_t* name;
+    const char* label;
+    int32_t forced;
+    bool enabled = false;
+    bool looked = false;
+    bool active = false;
+    int32_t* data = nullptr;  // TConsoleVariableData<int32>::ShadowedValue[2]
+    int32_t original = 0;
+};
+IntOverride g_overrides[] = {
+    {L"r.SSGI.Enable", "Disable SSGI (r.SSGI.Enable 0, test)", 0},
+    {L"r.SSR.Quality", "Disable SSR (r.SSR.Quality 0, test)", 0},
+};
+
+void ApplyOverrides() {
+    if (g_cvarState != CvarState::ready) return;
+    for (auto& o : g_overrides) {
+        if (!o.looked) {
+            o.looked = true;
+            auto data = static_cast<int32_t*>(cvars::FindData(*g_cvarSingleton, o.name, false));
+            if (data && data[0] >= 0 && data[0] <= 16) {
+                o.data = data;
+                Log("cvars: %ls = %d / %d", o.name, data[0], data[1]);
+            } else {
+                Log("cvars: %ls not found or implausible", o.name);
+            }
+        }
+        if (!o.data) continue;
+        if (o.enabled) {
+            if (!o.active) {
+                o.original = o.data[0];
+                o.active = true;
+                Log("cvars: forcing %ls %d (was %d)", o.name, o.forced, o.original);
+            }
+            o.data[0] = o.data[1] = o.forced;
+        } else if (o.active) {
+            o.data[0] = o.data[1] = o.original;
+            o.active = false;
+            Log("cvars: restored %ls %d", o.name, o.original);
+        }
+    }
+}
+
 std::string RenderScaleStatus() {
     char buf[160];
     if (g_cvarState != CvarState::ready) return "console variables not found";
@@ -1414,6 +1461,7 @@ void OnReshadePresent(effect_runtime* rt) {
     std::lock_guard lock(g_mutex);
     UpdateSwapchainInfo(rt);
     ApplyRenderScale();
+    ApplyOverrides();
     dlss::Tick(rt);
     if (rt->is_key_down(VK_CONTROL) && rt->is_key_pressed(VK_F9)) RequestDump();  // not F11: UE toggles fullscreen on it
     if (rt->is_key_down(VK_CONTROL) && rt->is_key_pressed(VK_F10)) RequestCbDump();
@@ -1430,6 +1478,8 @@ void DrawOverlay(effect_runtime*) {
         case CvarState::ready:
             ImGui::Checkbox("Force render scale + TAA upsampling", &g_forceScale);
             ImGui::SliderFloat("Screen percentage", &g_forcePercentage, 33.0f, 100.0f, "%.0f%%");
+            for (auto& o : g_overrides)
+                if (o.data) ImGui::Checkbox(o.label, &o.enabled);
             ImGui::Text("Now: r.ScreenPercentage %.1f, r.TemporalAA.Upsampling %d (game's own: %.0f, %d)",
                         g_screenPercentage[0], g_taaUpsampling[0], g_originalPercentage, g_originalUpsampling);
             if (g_foreignWrites) ImGui::Text("The game changed the forced values %u time(s), see the log.", g_foreignWrites);

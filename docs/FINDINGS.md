@@ -264,6 +264,28 @@ sizes):
   passes that read back the TAAU output (it doubles as the game's TAA history).
 - 0.5.10: fallback reasons are specific (which input is too small, etc.) and no longer
   include per-frame values, so they're logged once per change.
+- Cut frames confirmed: UE binds a **1x1 velocity** placeholder on every camera-cut frame.
+
+### Feedback loop: the TAAU output is read back into the next frame's lighting
+
+Frame dump 1705 (0.5.10, kick close-up, 85 frames after a reset that reached DLSS):
+
+- The TAAU history `t5` (`...565a0`) is the previous frame's TAAU output (DLSS output when
+  DLSS runs; the output ping-pongs between two 3840x1600 RGBA16F textures). Besides the
+  TAAU it is read early in the next frame by **#82 CS `67dca9330bbd3383`** and the lighting
+  composite **#112 PS `cd75f114186bff1a`** (as t6). That output becomes the scene colour
+  DLSS upscales.
+- These are UE 4.26 screen-space effects lighting the scene from the previous frame's
+  final colour, enabled by the pak mods: **`NativeSSGI_P.pak`** (`r.SSGI.Enable=1`,
+  `Quality=3`, `HalfRes=0`; it also sets `r.setres=1280x720`, which explains the 1280x720
+  windows) and **`BetterReflections_P.pak`** (`r.SSR.Quality=4`,
+  `r.SSR.HalfResSceneColor=0`, SSGI quality per scalability level).
+- With UE's TAA the loop is bounded by neighbourhood clamping. DLSS has no such clamp,
+  so a slightly misplaced or brighter copy re-enters every frame. That fits the
+  staircases with almost no motion and the blown-out brightness in every corrupted
+  screenshot.
+- 0.5.11 adds runtime test switches through the cvar access: "Disable SSGI"
+  (`r.SSGI.Enable 0`) and "Disable SSR" (`r.SSR.Quality 0`).
 
 ### Crash report from a probe 0.3.1 session
 
