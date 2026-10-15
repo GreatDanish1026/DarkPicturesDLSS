@@ -243,6 +243,18 @@ sizes):
 - **0.5.8:** double reset and 2 camera-only frames, then for 90 frames per pixel: game
   velocity more than 24 px away from camera motion is replaced by it. Logs each of the 40
   frames after a reset (decoded vs camera, % inflated, % replaced, max motion).
+- **Root cause found in the 0.5.8 run (18:52):** corrupted again at the "Yah!" kick
+  close-up (18:52:33.69, about 80 frames after the cut at 32.923) with small motion (mean
+  2.2 px, max 12 px). The per-frame lines after the cuts at frames 1582 and 1679 are
+  **missing**. Those cut frames never reached DLSS: they fell back to the game's TAAU
+  (fallback logging was capped at 10 per session, used up during loading), and since
+  bCameraCut is only set on the cut frame, **the reset was lost**. DLSS then carried the
+  previous shot's history into the new one. This also explains why the earlier
+  "fixes" seemed partly effective: it depended on whether the cut frame passed
+  validation.
+- **0.5.9:** cuts stay pending until DLSS actually evaluates; any frame DLSS missed
+  (fallback, unknown permutation, feature not ready) resets it on the next evaluate
+  (frame-gap check); fallback reasons are logged on every change of reason.
 
 ### Crash report from a probe 0.3.1 session
 

@@ -1196,7 +1196,20 @@ void RestoreComputeState(command_list* cmd, const ContextState& st) {
     if (st.csPipeline.handle) cmd->bind_pipeline(pipeline_stage::compute_shader, st.csPipeline);
 }
 
-uint32_t g_dlssSkipsLogged = 0;
+// A camera cut must reach DLSS even if the cut frame itself falls back to the game's
+// TAAU (the cut flag is only set on that one frame): it stays pending until DLSS runs.
+bool g_pendingCut = false;
+std::string g_lastSkipWhy;
+uint64_t g_skipCount = 0;
+
+void LogSkip(const std::string& why) {
+    ++g_skipCount;
+    // Every change of reason, and every 600th repeat, so cut frames can't hide.
+    if (why != g_lastSkipWhy || g_skipCount % 600 == 0)
+        Log("dlss: game TAAU used at frame %llu (%llu fallbacks so far): %s", static_cast<unsigned long long>(g_frame),
+            static_cast<unsigned long long>(g_skipCount), why.c_str());
+    g_lastSkipWhy = why;
+}
 
 bool OnDispatch(command_list* cmd, uint32_t x, uint32_t y, uint32_t z) {
     std::lock_guard lock(g_mutex);
@@ -1208,14 +1221,24 @@ bool OnDispatch(command_list* cmd, uint32_t x, uint32_t y, uint32_t z) {
     if (g_api != device_api::d3d12 || !IsTaau(st.cs) || !dlss::g_options.enabled) return false;
     dlss::Frame f;
     std::string why;
-    if (!BuildDlssFrame(cmd, st, f, why)) {
-        if (++g_dlssSkipsLogged <= 10) Log("dlss: game TAAU used this frame: %s", why.c_str());
+    const bool built = BuildDlssFrame(cmd, st, f, why);
+    g_pendingCut = g_pendingCut || f.reset;
+    if (!built) {
+        LogSkip(why);
         return false;
     }
+    f.reset = g_pendingCut;
+    f.frame = g_frame;
     // Snapshot first: whatever DLSS records must not be mistaken for the game's state.
     const ContextState saved = st;
     const dlss::Result r = dlss::Evaluate(f);
     if (r != dlss::Result::skipped) RestoreComputeState(cmd, saved);
+    if (r == dlss::Result::done) {
+        g_pendingCut = false;
+        g_lastSkipWhy.clear();
+    } else {
+        LogSkip(r == dlss::Result::failed ? "DLSS evaluate failed" : "DLSS not ready for this size");
+    }
     return r == dlss::Result::done;  // true skips the game's TAAU dispatch
 }
 

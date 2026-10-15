@@ -102,6 +102,7 @@ constexpr float kStaleThreshold = 24.0f;  // render pixels
 constexpr uint32_t kResetLogFrames = 40;  // per-frame diagnostics after a reset
 uint32_t g_resetLogLines = 0;
 uint32_t g_framesSinceReset = 1000;
+uint64_t g_lastEvalFrame = 0;  // frame of the last successful evaluate
 
 void SetStatus(const char* fmt, ...) {
     char buf[256];
@@ -411,7 +412,9 @@ Result Evaluate(const Frame& f) {
     // the cut frame and the next one, camera-only motion (ClipToPrevClip is right at a cut)
     // for kCameraOnlyFrames, then for kStaleWindow frames per pixel: game velocity that
     // disagrees with camera motion by more than kStaleThreshold px is replaced by it.
-    if (f.reset || switched) g_framesSinceReset = 0;
+    // Any frame the game TAAU ran instead of DLSS leaves DLSS history a frame behind: reset.
+    const bool gap = g_lastEvalFrame + 1 != f.frame;
+    if (f.reset || switched || gap) g_framesSinceReset = 0;
     const uint32_t age = g_framesSinceReset;
     const bool reset = age <= 1;
     const bool cameraOnly = g_options.ignoreVelocity || age < kCameraOnlyFrames;
@@ -491,6 +494,7 @@ Result Evaluate(const Frame& f) {
     }
     ++g_done;
     feature->lastUsed = g_done;
+    g_lastEvalFrame = f.frame;
     g_lastFeature = feature;
     SetStatus("running: %ux%u -> %ux%u", f.renderW, f.renderH, f.outW, f.outH);
     return Result::done;

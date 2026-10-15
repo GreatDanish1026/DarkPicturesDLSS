@@ -19,7 +19,8 @@ struct Frame {
     uint32_t outX = 0, outY = 0, outW = 0, outH = 0;  // output view rect
     float jitterX = 0, jitterY = 0;            // render pixels, from the TAA constants
     float clipToPrevClip[16] = {};             // View.ClipToPrevClip, row-major
-    bool reset = false;                        // camera cut
+    bool reset = false;                        // camera cut (sticky across fallback frames)
+    uint64_t frame = 0;                        // probe frame number, to spot frames DLSS missed
 };
 
 enum class Result {
