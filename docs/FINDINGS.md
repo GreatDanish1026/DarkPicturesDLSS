@@ -286,6 +286,12 @@ Frame dump 1705 (0.5.10, kick close-up, 85 frames after a reset that reached DLS
   screenshot.
 - 0.5.11 adds runtime test switches through the cvar access: "Disable SSGI"
   (`r.SSGI.Enable 0`) and "Disable SSR" (`r.SSR.Quality 0`).
+- **0.5.11 run (19:00-19:02):** game values were r.SSGI.Enable 1, r.SSR.Quality 4. With
+  both forced to 0 before the cutscene and DLSS on, the "And scene." shot was **clean,
+  with normal brightness** (19:01:46). All corrupted shots had been blown out. It's one
+  run of an intermittent problem, so it's strong evidence for the feedback-loop cause
+  but not yet proof. Options: turn SSGI/SSR off under DLSS, or break the loop by giving
+  the lighting a clamped copy of the DLSS output.
 
 ### Crash report from a probe 0.3.1 session
 
