@@ -136,9 +136,27 @@ sizes):
 | t5 | 3840x1600 RGBA16F | game history (DLSS keeps its own) |
 | u0 | **3840x1600 RGBA16F** | **DLSS output** |
 
-Still to capture: the TAAU permutation's `cb0`. No constants dump was written this
-session, though Ctrl+F10 worked before. The jitter should now be in render-resolution
-pixels. The TAAU shader key at other output sizes is still unknown.
+**TAAU constants** (`QuarryDLSS_cbuffers_20783.txt` and `_21082.txt`, 67%, camera moving),
+`6435b4eb8190e22b` `cb0` (29 float4):
+
+| Row | Contents |
+|---|---|
+| 2 | ints (2576, 1448, 1, 0): input texture size |
+| 3, 5, 19 | (2576, 1448, 1/2576, 1/1448): input texture size |
+| 4 | (half texel, max UV): 0.73999 = 1071.5/1448 |
+| 20 | ints (0, 0, 2575, 1071): input min/max pixel coord |
+| 21, 23 | (3840, 1600, 1/3840, 1/1600): output viewport size |
+| 24 | (0, 0, 3840, 1600): output viewport rect |
+| **27** | **(2576, 1072, 1/2576, 1/1072): render view rect size** |
+| **28** | **.xy = jitter in render pixels**, .zw = (0.6708, 1.4907): resolution fraction 2576/3840 and its inverse |
+
+- `cb1` row 126 (`View.TemporalAAJitter`) now scales by 2/2576 and −2/1072. That's the
+  **render** view rect.
+- **More jitter phases with TAAU:** the two 8-frame dumps continue the Halton(2,3)
+  sequence past index 8 (indices 2-16 seen, consecutive). This matches UE 4.26 scaling
+  r.TemporalAASamples by 1/fraction² when upsampling (8/0.67² → about 18). The DLSS
+  mod can use the engine's own sequence as is, read from `cb0` row 28 each frame.
+- Not seen yet: the TAAU permutation at other output sizes (the 1280x720 window).
 
 ### Crash report from a probe 0.3.1 session
 
