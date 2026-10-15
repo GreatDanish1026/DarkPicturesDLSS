@@ -14,7 +14,23 @@ Steam build 11105655, exe PE timestamp `0x64493c74`, UE 4.26.2. Probe 0.1.0, run
   targets, and the final pass writes it at y offset 280. The screen percentage is 100%
   (`sg.ResolutionQuality=100`), so TAA runs without upsampling.
 
-## Main TAA pass
+## Direct3D 12 (`-dx12`)
+
+Probe 0.2 run on 2026-10-15 with `-dx12` in the launch options:
+
+- **The D3D12 RHI works.** The game ran for about 2.5 minutes (8,700 frames) and didn't
+  crash. Swap chain: 3840x2160 `R10G10B10A2_UNORM`, 3 buffers. It creates throwaway
+  D3D12 devices at startup, the same way it does on D3D11.
+- **Same shaders on both APIs.** The D3D12 shader keys match the D3D11 ones (for example
+  `89b573cf3e394331`, `f0db50aa69e703c1`), so UE 4.26 ships SM5 DXBC for D3D12 too, not
+  DXIL. The DXBC declaration parser works on both.
+- The probe found no temporal passes and no constants on D3D12. It doesn't decode
+  descriptor tables, and UE's D3D12 constant buffers live in persistently mapped upload
+  rings rather than Map/Unmap. The cbuffer dumps from this run are empty for that reason.
+- This matters for frame generation: with a working D3D12 path, Streamline can run
+  natively. We wouldn't need the D3D11/D3D12 shared-resource bridge that Days Gone uses.
+
+## Main TAA pass (Direct3D 11)
 
 UE 4.26's standard compute TAA (`TemporalAA.usf`, `FTemporalAACS`), dispatched as
 8x8 thread groups (480x200 for 3840x1600). Identify it by **position**, not by hash: it
