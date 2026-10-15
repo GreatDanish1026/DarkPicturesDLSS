@@ -12,12 +12,18 @@ in the game. It only reports:
   field and light shafts;
 - the **main TAA guess** (the temporal pass with the largest output), with its render
   resolution, output resolution and every texture it reads and writes;
-- optionally, a full list of one frame's post-process passes.
+- optionally, a full list of one frame's post-process passes;
+- optionally, the constant buffers of the large temporal passes over 8 frames, to find
+  the TAA jitter.
+
+Only the texture, UAV and constant-buffer slots a shader declares are listed (read
+from its DXBC), because the D3D11 RHI leaves earlier views bound between passes.
 
 ## Build
 
 ```powershell
 .\build.ps1            # -> bin\QuarryDLSS.addon64
+.\build.ps1 -Test      # also builds and runs the DXBC parser tests
 .\build.ps1 -Install   # also copies it to the game's SMG026\Binaries\Win64
 ```
 
@@ -35,6 +41,7 @@ ReShade: it returns API structs with a different calling convention than MSVC.
 4. Start the game and load into gameplay. Press **Home**, then open the
    **Add-ons → QuarryDLSS probe** section to see the API and the main TAA guess.
 5. Press **Ctrl+F11** (or the overlay button) once in a busy scene to dump a frame.
+   Then, while the camera moves, press **Ctrl+F10** to dump 8 frames of TAA constants.
 6. Optional: try a second run with `-dx12` in the Steam launch options, to see whether
    the Direct3D 12 renderer starts.
 
@@ -42,6 +49,7 @@ Send back these files from `SMG026\Binaries\Win64`:
 
 - `QuarryDLSS.log` (and `QuarryDLSS.prev.log` from the `-dx12` run)
 - `QuarryDLSS_frame_<n>.txt`
+- `QuarryDLSS_cbuffers_<n>.txt`
 - `ReShade.log`
 
 Then step 2 can map the engine hooks (the temporal upscaler slot, jitter, camera) for this build.

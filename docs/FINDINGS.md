@@ -58,7 +58,7 @@ issues).
   temporal reprojection.
 - `6ab2395f4c09edf2` / `799ce21f5644c2ac` (buffers only): GPU particle simulation.
 
-## Probe issues to fix (probe 0.2)
+## Probe issues (all addressed in probe 0.2; waiting on a game run)
 
 - D3D11 SRV slots stay bound after a pass, so every pass lists stale inputs. Decode the
   shader's own `dcl_resource` / `dcl_uav` declarations from its DXBC and list only the

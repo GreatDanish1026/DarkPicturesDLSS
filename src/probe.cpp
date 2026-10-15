@@ -9,9 +9,15 @@
 // and light shafts, so the pass with the largest output is reported as the main
 // TAA guess.
 //
+// Only the t#/u#/cb# slots a shader declares in its DXBC are listed, because the
+// D3D11 RHI leaves earlier views bound. Constant buffers are mirrored on the CPU
+// (creation data, Map/Unmap, UpdateSubresource) so a pass's constants can be
+// dumped, which is where the TAA jitter lives.
+//
 // Output, next to the game executable:
 //   QuarryDLSS.log                 API, swap chain, every temporal pass found
 //   QuarryDLSS_frame_<n>.txt       full pass list of one frame (Ctrl+F11 or the overlay)
+//   QuarryDLSS_cbuffers_<n>.txt    constants of the large temporal passes, 8 frames (Ctrl+F10)
 //
 // Descriptor tables are not decoded, so on Direct3D 12 only render targets are
 // seen and compute passes report no inputs. Direct3D 11 is fully covered.
@@ -34,6 +40,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "dxbc.hpp"
 #include "version.h"
 
 extern "C" __declspec(dllexport) const char* NAME = "QuarryDLSS probe";
@@ -47,6 +54,7 @@ using namespace reshade::api;
 constexpr uint32_t kMaxSrv = 32;
 constexpr uint32_t kMaxUav = 8;
 constexpr uint32_t kMaxRtv = 8;
+constexpr uint32_t kMaxCb = 14;
 constexpr uint64_t kGeometryKey = 0;  // writer key for scene geometry draws
 
 // ---------------------------------------------------------------- logging
@@ -191,6 +199,12 @@ struct PipelineInfo {
     uint64_t vs = 0, ps = 0, cs = 0;
 };
 std::unordered_map<uint64_t, PipelineInfo> g_pipelines;
+std::unordered_map<uint64_t, ShaderDecl> g_decls;  // by shader key
+
+const ShaderDecl* FindDecl(uint64_t key) {
+    auto it = g_decls.find(key);
+    return it != g_decls.end() && it->second.valid ? &it->second : nullptr;
+}
 
 // ---------------------------------------------------------------- per-context state
 
@@ -199,6 +213,8 @@ struct ContextState {
     resource_view psSrv[kMaxSrv] = {};
     resource_view csSrv[kMaxSrv] = {};
     resource_view csUav[kMaxUav] = {};
+    buffer_range psCb[kMaxCb] = {};
+    buffer_range csCb[kMaxCb] = {};
     resource_view rtv[kMaxRtv] = {};
     uint32_t rtvCount = 0;
     resource_view dsv = {};
@@ -241,6 +257,24 @@ struct Candidate {
 };
 std::unordered_map<uint64_t, Candidate> g_candidates;
 uint64_t g_mainKey = 0;
+uint32_t g_bbW = 0, g_bbH = 0;  // back buffer size
+
+// CPU copies of every constant buffer (64 KB or less), kept current from the
+// game's creation data, Map/Unmap and UpdateSubresource, so a pass's constants
+// can be dumped without reading back from the GPU.
+std::unordered_map<uint64_t, uint64_t> g_cbSize;               // constant buffer -> size
+std::unordered_map<uint64_t, std::vector<uint8_t>> g_cbData;   // constant buffer -> contents
+struct PendingMap {
+    uint8_t* ptr;
+    uint64_t offset, size;
+};
+std::unordered_map<uint64_t, PendingMap> g_maps;
+
+// Constant buffer dump (Ctrl+F10): every large temporal pass for kCbDumpFrames frames.
+constexpr uint64_t kCbDumpFrames = 8;
+uint64_t g_cbDumpFirst = 0, g_cbDumpLast = 0;
+std::string g_cbDump;
+std::string g_lastCbDumpFile;
 uint32_t g_mainInW = 0, g_mainInH = 0, g_mainOutW = 0, g_mainOutH = 0;
 
 // ---------------------------------------------------------------- pass analysis
@@ -269,7 +303,7 @@ bool IsHistory(const Binding& b, uint64_t key) {
            g_frame - b.writer->frame <= 2;
 }
 
-std::string Describe(const Binding& b, uint64_t key) {
+std::string Describe(const Binding& b, uint64_t key, bool input) {
     char buf[256];
     const auto& t = b.desc.texture;
     int n;
@@ -282,9 +316,9 @@ std::string Describe(const Binding& b, uint64_t key) {
                      b.viewFormat != t.format ? FormatName(t.format) : "", t.levels,
                      static_cast<unsigned long long>(b.res.handle));
     std::string s(buf, n > 0 ? std::min<size_t>(n, sizeof(buf) - 1) : 0);
-    if (IsHistory(b, key)) {
+    if (input && IsHistory(b, key)) {
         s += "  <- HISTORY (own output, last frame)";
-    } else if (b.writer && b.writer->frame == g_frame) {
+    } else if (input && b.writer && b.writer->frame == g_frame) {
         if (b.writer->key == kGeometryKey)
             snprintf(buf, sizeof(buf), "  <- scene geometry");
         else
@@ -299,6 +333,39 @@ void MarkWritten(resource res, uint64_t key) {
     if (res.handle) g_writers[res.handle] = {key, g_frame, g_pass};
 }
 
+// Each declared constant buffer as float4 rows: values, then raw bits.
+std::string DumpConstantBuffers(const buffer_range* cbs, const ShaderDecl* decl) {
+    std::string s;
+    char line[192];
+    for (uint32_t i = 0; i < kMaxCb; ++i) {
+        if (decl ? !decl->HasCb(i) : !cbs[i].buffer.handle) continue;
+        const buffer_range& r = cbs[i];
+        const uint32_t declared = decl ? decl->cbVec4[i] : 0;
+        snprintf(line, sizeof(line), "  cb%u: buffer %llx, offset %llu, declared %u float4\n", i,
+                 static_cast<unsigned long long>(r.buffer.handle), static_cast<unsigned long long>(r.offset), declared);
+        s += line;
+        auto it = g_cbData.find(r.buffer.handle);
+        if (!r.buffer.handle || it == g_cbData.end()) {
+            s += "    (contents not captured)\n";
+            continue;
+        }
+        const auto& data = it->second;
+        if (r.offset >= data.size()) continue;
+        uint64_t rows = (data.size() - r.offset) / 16;
+        if (declared) rows = std::min<uint64_t>(rows, declared);
+        for (uint64_t row = 0; row < rows; ++row) {
+            float f[4];
+            uint32_t u[4];
+            memcpy(f, data.data() + r.offset + row * 16, 16);
+            memcpy(u, f, 16);
+            snprintf(line, sizeof(line), "    [%3llu] %14.7g %14.7g %14.7g %14.7g | %08x %08x %08x %08x\n",
+                     static_cast<unsigned long long>(row), f[0], f[1], f[2], f[3], u[0], u[1], u[2], u[3]);
+            s += line;
+        }
+    }
+    return s;
+}
+
 // A dispatch or full-screen draw: work out its inputs and outputs, flag history
 // reads, and record what it writes.
 void OnPass(command_list* cmd, bool compute, const char* what) {
@@ -306,9 +373,12 @@ void OnPass(command_list* cmd, bool compute, const char* what) {
     const uint64_t key = compute ? st.cs : st.ps;
     device* dev = cmd->get_device();
 
+    // Only slots the shader declares; the D3D11 RHI leaves earlier views bound.
+    const ShaderDecl* decl = FindDecl(key);
     std::vector<Binding> in, out;
     const resource_view* srv = compute ? st.csSrv : st.psSrv;
     for (uint32_t i = 0; i < kMaxSrv; ++i) {
+        if (decl && !decl->HasSrv(i)) continue;
         Binding b{};
         if (ResolveView(dev, srv[i], b)) {
             snprintf(b.slot, sizeof(b.slot), "t%u", i);
@@ -317,6 +387,7 @@ void OnPass(command_list* cmd, bool compute, const char* what) {
     }
     if (compute) {
         for (uint32_t i = 0; i < kMaxUav; ++i) {
+            if (decl && !decl->HasUav(i)) continue;
             Binding b{};
             if (ResolveView(dev, st.csUav[i], b)) {
                 snprintf(b.slot, sizeof(b.slot), "u%u", i);
@@ -360,8 +431,9 @@ void OnPass(command_list* cmd, bool compute, const char* what) {
         if (!compute)
             snprintf(head + strlen(head), sizeof(head) - strlen(head), "  viewport %.0fx%.0f+%.0f+%.0f",
                      st.vp.width, st.vp.height, st.vp.x, st.vp.y);
-        for (const auto& b : in) io += "    in  " + Describe(b, key) + "\n";
-        for (const auto& b : out) io += "    out " + Describe(b, key) + "\n";
+        if (!decl) io += "    (shader declarations not parsed: listing every bound slot)\n";
+        for (const auto& b : in) io += "    in  " + Describe(b, key, true) + "\n";
+        for (const auto& b : out) io += "    out " + Describe(b, key, false) + "\n";
 
         if (dumping) {
             char line[64];
@@ -391,6 +463,18 @@ void OnPass(command_list* cmd, bool compute, const char* what) {
         }
     }
     g_geometryRun = 0;
+
+    // Constants of the large temporal passes (the main TAA and its look-alikes).
+    if (history && g_cbDumpFirst && g_frame >= g_cbDumpFirst && g_frame <= g_cbDumpLast &&
+        uint64_t(outW) * outH * 4 >= uint64_t(g_bbW) * g_bbH) {
+        char head[192];
+        snprintf(head, sizeof(head), "frame %llu pass #%u %s %016llx  in %ux%u -> out %ux%u\n",
+                 static_cast<unsigned long long>(g_frame), g_pass, compute ? "CS" : "PS",
+                 static_cast<unsigned long long>(key), inW, inH, outW, outH);
+        g_cbDump += head;
+        g_cbDump += DumpConstantBuffers(compute ? st.csCb : st.psCb, decl);
+        g_cbDump += "\n";
+    }
 
     for (const auto& b : out) MarkWritten(b.res, key);
     ++g_pass;
@@ -491,6 +575,8 @@ void UpdateSwapchainInfo(effect_runtime* rt) {
     char buf[160];
     snprintf(buf, sizeof(buf), "%ux%u %s, %u buffers", d.texture.width, d.texture.height, FormatName(d.texture.format),
              rt->get_back_buffer_count());
+    g_bbW = d.texture.width;
+    g_bbH = d.texture.height;
     if (g_swapchain != buf) {
         g_swapchain = buf;
         Log("back buffer: %s", g_swapchain.c_str());
@@ -499,18 +585,23 @@ void UpdateSwapchainInfo(effect_runtime* rt) {
 
 void OnInitPipeline(device*, pipeline_layout, uint32_t count, const pipeline_subobject* subs, pipeline p) {
     PipelineInfo info;
+    const shader_desc* parsed[2] = {};  // pixel, compute
     for (uint32_t i = 0; i < count; ++i) {
         auto sd = static_cast<const shader_desc*>(subs[i].data);
         switch (subs[i].type) {
             case pipeline_subobject_type::vertex_shader: info.vs = ShaderKey(sd); break;
-            case pipeline_subobject_type::pixel_shader: info.ps = ShaderKey(sd); break;
-            case pipeline_subobject_type::compute_shader: info.cs = ShaderKey(sd); break;
+            case pipeline_subobject_type::pixel_shader: info.ps = ShaderKey(sd); parsed[0] = sd; break;
+            case pipeline_subobject_type::compute_shader: info.cs = ShaderKey(sd); parsed[1] = sd; break;
             default: break;
         }
     }
     if (!info.vs && !info.ps && !info.cs) return;
     std::lock_guard lock(g_mutex);
     g_pipelines[p.handle] = info;
+    const uint64_t keys[2] = {info.ps, info.cs};
+    for (int i = 0; i < 2; ++i)
+        if (keys[i] && parsed[i] && !g_decls.count(keys[i]))
+            g_decls[keys[i]] = ParseDxbc(parsed[i]->code, parsed[i]->code_size);
 }
 
 void OnDestroyPipeline(device*, pipeline p) {
@@ -521,6 +612,60 @@ void OnDestroyPipeline(device*, pipeline p) {
 void OnDestroyResource(device*, resource r) {
     std::lock_guard lock(g_mutex);
     g_writers.erase(r.handle);
+    if (g_cbSize.erase(r.handle)) {
+        g_cbData.erase(r.handle);
+        g_maps.erase(r.handle);
+    }
+}
+
+// ---------------------------------------------------------------- constant buffer shadows
+
+void OnInitResource(device*, const resource_desc& desc, const subresource_data* init, resource_usage, resource r) {
+    if (desc.type != resource_type::buffer || desc.buffer.size == 0 || desc.buffer.size > 65536 ||
+        (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(resource_usage::constant_buffer)) == 0)
+        return;
+    std::lock_guard lock(g_mutex);
+    g_cbSize[r.handle] = desc.buffer.size;
+    auto& data = g_cbData[r.handle];
+    data.assign(desc.buffer.size, 0);
+    if (init && init->data) memcpy(data.data(), init->data, desc.buffer.size);
+}
+
+void WriteShadow(resource r, uint64_t offset, uint64_t size, const void* src) {
+    auto it = g_cbSize.find(r.handle);
+    if (it == g_cbSize.end() || !src || offset >= it->second) return;
+    size = std::min(size, it->second - offset);
+    auto& data = g_cbData[r.handle];
+    data.resize(it->second);
+    memcpy(data.data() + offset, src, size);
+}
+
+void OnMapBuffer(device*, resource r, uint64_t offset, uint64_t size, map_access access, void** data) {
+    if (access == map_access::read_only || !data || !*data) return;
+    std::lock_guard lock(g_mutex);
+    auto it = g_cbSize.find(r.handle);
+    if (it == g_cbSize.end() || offset >= it->second) return;
+    g_maps[r.handle] = {static_cast<uint8_t*>(*data), offset, std::min(size, it->second - offset)};
+}
+
+void OnUnmapBuffer(device*, resource r) {
+    std::lock_guard lock(g_mutex);
+    auto it = g_maps.find(r.handle);
+    if (it == g_maps.end()) return;
+    WriteShadow(r, it->second.offset, it->second.size, it->second.ptr);
+    g_maps.erase(it);
+}
+
+bool OnUpdateBuffer(device*, const void* data, resource dest, uint64_t offset, uint64_t size) {
+    std::lock_guard lock(g_mutex);
+    WriteShadow(dest, offset, size, data);
+    return false;
+}
+
+bool OnUpdateBufferCommand(command_list*, const void* data, resource dest, uint64_t offset, uint64_t size) {
+    std::lock_guard lock(g_mutex);
+    WriteShadow(dest, offset, size, data);
+    return false;
 }
 
 void OnBindPipeline(command_list* cmd, pipeline_stage stages, pipeline p) {
@@ -543,6 +688,13 @@ void OnPushDescriptors(command_list* cmd, shader_stage stages, pipeline_layout, 
     uint32_t cap = 0;
     std::lock_guard lock(g_mutex);
     auto& st = g_contexts[cmd];
+    if (u.type == descriptor_type::constant_buffer) {
+        buffer_range* cbs = cs ? st.csCb : st.psCb;
+        auto ranges = static_cast<const buffer_range*>(u.descriptors);
+        for (uint32_t i = 0; i < u.count && u.binding + i < kMaxCb; ++i)
+            cbs[u.binding + i] = ranges ? ranges[i] : buffer_range{};
+        return;
+    }
     switch (u.type) {
         case descriptor_type::shader_resource_view:
         case descriptor_type::buffer_shader_resource_view:
@@ -619,9 +771,30 @@ bool OnCopyResource(command_list* cmd, resource src, resource dst) {
     return false;
 }
 
+void WriteCbDump() {
+    wchar_t name[64];
+    swprintf(name, 64, L"QuarryDLSS_cbuffers_%llu.txt", static_cast<unsigned long long>(g_cbDumpFirst));
+    std::wstring path = g_dir + name;
+    if (FILE* f = _wfopen(path.c_str(), L"w")) {
+        fprintf(f, "QuarryDLSS probe %s - constant buffers, frames %llu-%llu\nswap chain: %s\n\n", QDLSS_VERSION,
+                static_cast<unsigned long long>(g_cbDumpFirst), static_cast<unsigned long long>(g_cbDumpLast),
+                g_swapchain.c_str());
+        fprintf(f, "Every temporal pass with an output of at least a quarter of the back buffer.\n"
+                   "Rows are float4: values, then raw bits. Jitter shows as small values that\n"
+                   "change every frame and repeat with the TAA sample count.\n\n");
+        fputs(g_cbDump.c_str(), f);
+        fclose(f);
+        g_lastCbDumpFile = Narrow(name);
+        Log("wrote %s (%zu bytes)", g_lastCbDumpFile.c_str(), g_cbDump.size());
+    }
+    g_cbDump.clear();
+    g_cbDumpFirst = g_cbDumpLast = 0;
+}
+
 void OnPresent(command_queue*, swapchain*, const rect*, const rect*, uint32_t, const rect*) {
     std::lock_guard lock(g_mutex);
     if (g_dumpFrame && g_frame == g_dumpFrame) WriteDump();
+    if (g_cbDumpFirst && g_frame == g_cbDumpLast) WriteCbDump();
     UpdateMainGuess();
     ++g_frame;
     g_pass = 0;
@@ -635,10 +808,19 @@ void RequestDump() {
     }
 }
 
+void RequestCbDump() {
+    if (!g_cbDumpFirst) {
+        g_cbDumpFirst = g_frame + 1;
+        g_cbDumpLast = g_frame + kCbDumpFrames;
+        g_cbDump.clear();
+    }
+}
+
 void OnReshadePresent(effect_runtime* rt) {
     std::lock_guard lock(g_mutex);
     UpdateSwapchainInfo(rt);
     if (rt->is_key_down(VK_CONTROL) && rt->is_key_pressed(VK_F11)) RequestDump();
+    if (rt->is_key_down(VK_CONTROL) && rt->is_key_pressed(VK_F10)) RequestCbDump();
 }
 
 void DrawOverlay(effect_runtime*) {
@@ -672,6 +854,10 @@ void DrawOverlay(effect_runtime*) {
     ImGui::Separator();
     if (ImGui::Button(g_dumpFrame ? "Capturing..." : "Dump next frame (Ctrl+F11)")) RequestDump();
     if (!g_lastDumpFile.empty()) ImGui::Text("Last dump: %s", g_lastDumpFile.c_str());
+    if (ImGui::Button(g_cbDumpFirst ? "Capturing constants..." : "Dump TAA constants, 8 frames (Ctrl+F10)"))
+        RequestCbDump();
+    if (!g_lastCbDumpFile.empty()) ImGui::Text("Last constants dump: %s", g_lastCbDumpFile.c_str());
+    ImGui::Text("Constant buffers tracked: %zu", g_cbSize.size());
     ImGui::TextUnformatted("Log: QuarryDLSS.log next to the game executable.");
 }
 
@@ -683,6 +869,11 @@ void Install() {
     reshade::register_event<reshade::addon_event::init_pipeline>(&OnInitPipeline);
     reshade::register_event<reshade::addon_event::destroy_pipeline>(&OnDestroyPipeline);
     reshade::register_event<reshade::addon_event::destroy_resource>(&OnDestroyResource);
+    reshade::register_event<reshade::addon_event::init_resource>(&OnInitResource);
+    reshade::register_event<reshade::addon_event::map_buffer_region>(&OnMapBuffer);
+    reshade::register_event<reshade::addon_event::unmap_buffer_region>(&OnUnmapBuffer);
+    reshade::register_event<reshade::addon_event::update_buffer_region>(&OnUpdateBuffer);
+    reshade::register_event<reshade::addon_event::update_buffer_region_command>(&OnUpdateBufferCommand);
     reshade::register_event<reshade::addon_event::bind_pipeline>(&OnBindPipeline);
     reshade::register_event<reshade::addon_event::push_descriptors>(&OnPushDescriptors);
     reshade::register_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(&OnBindTargets);

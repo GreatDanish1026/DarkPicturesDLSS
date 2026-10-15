@@ -1,9 +1,12 @@
 # Builds bin\QuarryDLSS.addon64 with MSVC (Visual Studio 2022+ with C++ tools).
 # MSVC is required: ReShade is built with it, and MinGW returns API structs
 # (resource, resource_desc, ...) differently, which crashes inside ReShade.
-# Usage: .\build.ps1 [-Install]   (-Install copies it next to TheQuarry-Win64-Shipping.exe)
+# Usage: .\build.ps1 [-Test] [-Install]
+#   -Test     also builds and runs tests\dxbc_tests.cpp
+#   -Install  copies the add-on next to TheQuarry-Win64-Shipping.exe
 param(
     [switch]$Install,
+    [switch]$Test,
     [string]$GameBin = "E:\SteamLibrary\steamapps\common\The Quarry\SMG026\Binaries\Win64"
 )
 $ErrorActionPreference = 'Stop'
@@ -29,6 +32,17 @@ $cmd = @(
 cmd /c $cmd
 if ($LASTEXITCODE) { throw "add-on build failed" }
 Write-Host "Built $root\bin\QuarryDLSS.addon64"
+
+if ($Test) {
+    $testCmd = @(
+        "call `"$vcvars`" >nul",
+        ("cl /nologo /std:c++17 /O2 /EHsc /MT /W3 /Fo`"$obj\\`" `"$root\tests\dxbc_tests.cpp`" " +
+         "/link /OUT:`"$root\bin\dxbc_tests.exe`""),
+        "`"$root\bin\dxbc_tests.exe`""
+    ) -join " && "
+    cmd /c $testCmd
+    if ($LASTEXITCODE) { throw "tests failed" }
+}
 
 if ($Install) {
     if (-not (Test-Path "$GameBin\TheQuarry-Win64-Shipping.exe")) { throw "Game not found in $GameBin" }
