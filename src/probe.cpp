@@ -34,6 +34,7 @@
 #include <reshade.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -44,6 +45,7 @@
 #include <vector>
 
 #include "cvars.hpp"
+#include "dlss.hpp"
 #include "dxbc.hpp"
 #include "version.h"
 
@@ -292,6 +294,11 @@ struct ContextState {
     // D3D12: root signature and bound descriptor tables, [0] graphics, [1] compute.
     pipeline_layout layout[2] = {};
     descriptor_table tables[2][kMaxRootParams] = {};
+    // D3D12 compute state, so it can be re-bound after DLSS (by root parameter).
+    pipeline csPipeline = {};
+    buffer_range csRootCbv[kMaxRootParams] = {};
+    uint64_t csRootCbvMask = 0;
+    std::unordered_map<uint32_t, std::vector<uint32_t>> csRootConstants;
 };
 std::unordered_map<command_list*, ContextState> g_contexts;
 
@@ -776,6 +783,7 @@ void OnDestroyResource(device*, resource r) {
     g_writers.erase(r.handle);
     g_live.erase(r.handle);
     g_mapped.erase(r.handle);
+    dlss::OnDestroyResource(r);
     if (g_cbSize.erase(r.handle)) {
         g_cbData.erase(r.handle);
         g_maps.erase(r.handle);
@@ -946,6 +954,10 @@ void OnBindDescriptorTables(command_list* cmd, shader_stage stages, pipeline_lay
         for (auto& t : st.tables[g]) t = {};
         buffer_range* cbs = g ? st.csCb : st.psCb;
         std::fill(cbs, cbs + kMaxCb, buffer_range{});
+        if (g) {
+            st.csRootCbvMask = 0;
+            st.csRootConstants.clear();
+        }
     }
     for (uint32_t i = 0; i < count && first + i < kMaxRootParams; ++i) st.tables[g][first + i] = tables[i];
 }
@@ -961,7 +973,10 @@ void OnBindPipeline(command_list* cmd, pipeline_stage stages, pipeline p) {
     PipelineInfo info;
     if (auto it = g_pipelines.find(p.handle); it != g_pipelines.end()) info = it->second;
     auto has = [&](pipeline_stage s) { return (static_cast<uint32_t>(stages) & static_cast<uint32_t>(s)) != 0; };
-    if (has(pipeline_stage::compute_shader)) st.cs = info.cs;
+    if (has(pipeline_stage::compute_shader)) {
+        st.cs = info.cs;
+        st.csPipeline = p;
+    }
     if (has(pipeline_stage::pixel_shader)) st.ps = info.ps;
     if (has(pipeline_stage::vertex_shader)) st.vs = info.vs;
 }
@@ -974,8 +989,13 @@ void OnPushRootDescriptor(ContextState& st, bool compute, pipeline_layout layout
     auto lit = g_layouts.find(layout.handle);
     if (lit == g_layouts.end() || param >= lit->second.size() || lit->second[param].ranges.empty()) return;
     const descriptor_range& r = lit->second[param].ranges[0];
+    const buffer_range& range = static_cast<const buffer_range*>(u.descriptors)[0];
+    if (compute && param < kMaxRootParams) {
+        st.csRootCbv[param] = range;
+        st.csRootCbvMask |= 1ull << param;
+    }
     if (r.dx_register_space != 0 || !Visible(r.visibility, compute) || r.dx_register_index >= kMaxCb) return;
-    (compute ? st.csCb : st.psCb)[r.dx_register_index] = static_cast<const buffer_range*>(u.descriptors)[0];
+    (compute ? st.csCb : st.psCb)[r.dx_register_index] = range;
 }
 
 void OnPushDescriptors(command_list* cmd, shader_stage stages, pipeline_layout layout, uint32_t param,
@@ -1052,12 +1072,133 @@ bool OnDrawIndexed(command_list* cmd, uint32_t indices, uint32_t instances, uint
     return false;
 }
 
+// ---------------------------------------------------------------- DLSS in place of TAAU
+
+// The game's TAAU compute shaders (TemporalAA.usf with upsampling), by shader key.
+constexpr uint64_t kTaauShaders[] = {
+    0x6435b4eb8190e22bull,  // 3840x1600 output, 67% (2026-10-15)
+};
+
+bool IsTaau(uint64_t key) {
+    for (uint64_t k : kTaauShaders)
+        if (k == key) return true;
+    return false;
+}
+
+// Bindings and constants of one TAAU dispatch (FINDINGS.md, "TAAU path at 67%"):
+// t1 colour, t2 depth, t3 velocity, u0 output; cb0 row 27 render rect, row 24 output
+// rect, row 28.xy jitter, row 0.z camera cut; cb1 (View) rows 122-125 ClipToPrevClip.
+bool BuildDlssFrame(command_list* cmd, const ContextState& st, dlss::Frame& f, std::string& why) {
+    device* dev = cmd->get_device();
+    const HeapEntry* color = ResolveTableSlot(dev, st, true, Slot::srv, 1);
+    const HeapEntry* depth = ResolveTableSlot(dev, st, true, Slot::srv, 2);
+    const HeapEntry* velocity = ResolveTableSlot(dev, st, true, Slot::srv, 3);
+    const HeapEntry* output = ResolveTableSlot(dev, st, true, Slot::uav, 0);
+    for (const HeapEntry* e : {color, depth, velocity, output})
+        if (!e || !e->res || !IsLive(e->res)) {
+            why = "a TAAU input or output could not be resolved";
+            return false;
+        }
+    std::vector<uint8_t> cb0, cb1;
+    if (!ReadConstants(dev, st.csCb[0], 29 * 16, cb0) || cb0.size() < 29 * 16 ||
+        !ReadConstants(dev, st.csCb[1], 126 * 16, cb1) || cb1.size() < 126 * 16) {
+        why = "the TAAU constants could not be read";
+        return false;
+    }
+    auto row = [](const std::vector<uint8_t>& v, int r) { return reinterpret_cast<const float*>(v.data() + r * 16); };
+    uint32_t cameraCut;
+    memcpy(&cameraCut, row(cb0, 0) + 2, 4);
+
+    f.cmd = cmd;
+    f.color = {color->res};
+    f.depth = {depth->res};
+    f.velocity = {velocity->res};
+    f.output = {output->res};
+    f.renderW = static_cast<uint32_t>(row(cb0, 27)[0]);
+    f.renderH = static_cast<uint32_t>(row(cb0, 27)[1]);
+    f.outX = static_cast<uint32_t>(row(cb0, 24)[0]);
+    f.outY = static_cast<uint32_t>(row(cb0, 24)[1]);
+    f.outW = static_cast<uint32_t>(row(cb0, 24)[2]) - f.outX;
+    f.outH = static_cast<uint32_t>(row(cb0, 24)[3]) - f.outY;
+    f.jitterX = row(cb0, 28)[0];
+    f.jitterY = row(cb0, 28)[1];
+    f.reset = cameraCut != 0;
+    memcpy(f.clipToPrevClip, row(cb1, 122), sizeof(f.clipToPrevClip));
+
+    const auto colorDesc = dev->get_resource_desc(f.color);
+    const auto outDesc = dev->get_resource_desc(f.output);
+    if (f.renderW == 0 || f.renderH == 0 || f.renderW > colorDesc.texture.width || f.renderH > colorDesc.texture.height ||
+        f.outW == 0 || f.outH == 0 || f.outX + f.outW > outDesc.texture.width || f.outY + f.outH > outDesc.texture.height ||
+        std::abs(f.jitterX) > 0.5f || std::abs(f.jitterY) > 0.5f) {
+        char buf[160];
+        snprintf(buf, sizeof(buf), "implausible TAAU constants (render %ux%u, output %u,%u %ux%u, jitter %g,%g)",
+                 f.renderW, f.renderH, f.outX, f.outY, f.outW, f.outH, f.jitterX, f.jitterY);
+        why = buf;
+        return false;
+    }
+    return true;
+}
+
+// NGX bound its own heaps, root signature and pipeline behind ReShade's back. Our
+// prepare pass left ReShade tracking its own transient heaps and our root signature,
+// so re-binding the game's tables through ReShade re-issues SetDescriptorHeaps and
+// SetComputeRootSignature, and then the game's tables, root CBVs, root constants and
+// pipeline go back exactly as the game left them. Graphics tables are re-bound too
+// (same values): if the compute root signature has no sampler table, that is what
+// puts the game's sampler heap back.
+void RestoreComputeState(command_list* cmd, const ContextState& st) {
+    if (st.layout[0].handle)
+        for (uint32_t p = 0; p < kMaxRootParams; ++p)
+            if (st.tables[0][p].handle)
+                cmd->bind_descriptor_tables(shader_stage::all_graphics, st.layout[0], p, 1, &st.tables[0][p]);
+    const pipeline_layout layout = st.layout[1];
+    for (uint32_t p = 0; p < kMaxRootParams; ++p)
+        if (st.tables[1][p].handle) cmd->bind_descriptor_tables(shader_stage::all_compute, layout, p, 1, &st.tables[1][p]);
+    for (uint32_t p = 0; p < kMaxRootParams; ++p)
+        if (st.csRootCbvMask & (1ull << p))
+            cmd->push_descriptors(shader_stage::all_compute, layout, p,
+                                  descriptor_table_update{{}, 0, 0, 1, descriptor_type::constant_buffer, &st.csRootCbv[p]});
+    for (const auto& [p, values] : st.csRootConstants)
+        cmd->push_constants(shader_stage::all_compute, layout, p, 0, static_cast<uint32_t>(values.size()), values.data());
+    if (st.csPipeline.handle) cmd->bind_pipeline(pipeline_stage::compute_shader, st.csPipeline);
+}
+
+uint32_t g_dlssSkipsLogged = 0;
+
 bool OnDispatch(command_list* cmd, uint32_t x, uint32_t y, uint32_t z) {
     std::lock_guard lock(g_mutex);
     char what[48];
     snprintf(what, sizeof(what), "dispatch %ux%ux%u", x, y, z);
     OnPass(cmd, true, what);
-    return false;
+
+    auto& st = g_contexts[cmd];
+    if (g_api != device_api::d3d12 || !IsTaau(st.cs) || !dlss::g_options.enabled) return false;
+    dlss::Frame f;
+    std::string why;
+    if (!BuildDlssFrame(cmd, st, f, why)) {
+        if (++g_dlssSkipsLogged <= 10) Log("dlss: game TAAU used this frame: %s", why.c_str());
+        return false;
+    }
+    // Snapshot first: whatever DLSS records must not be mistaken for the game's state.
+    const ContextState saved = st;
+    const dlss::Result r = dlss::Evaluate(f);
+    if (r != dlss::Result::skipped) RestoreComputeState(cmd, saved);
+    return r == dlss::Result::done;  // true skips the game's TAAU dispatch
+}
+
+void OnPushConstants(command_list* cmd, shader_stage stages, pipeline_layout, uint32_t param, uint32_t first,
+                     uint32_t count, const void* values) {
+    if (g_api != device_api::d3d12 || !(static_cast<uint32_t>(stages) & static_cast<uint32_t>(shader_stage::compute)))
+        return;
+    std::lock_guard lock(g_mutex);
+    auto& v = g_contexts[cmd].csRootConstants[param];
+    if (v.size() < first + count) v.resize(first + count);
+    memcpy(v.data() + first, values, count * 4);
+}
+
+void OnDestroyDevice(device* dev) {
+    std::lock_guard lock(g_mutex);
+    dlss::Shutdown(dev);
 }
 
 bool OnCopyResource(command_list* cmd, resource src, resource dst) {
@@ -1259,6 +1400,14 @@ void DrawOverlay(effect_runtime*) {
     if (ImGui::Button(g_cbDumpFirst ? "Capturing constants..." : "Dump TAA constants, 8 frames (Ctrl+F10)"))
         RequestCbDump();
     if (!g_lastCbDumpFile.empty()) ImGui::Text("Last constants dump: %s", g_lastCbDumpFile.c_str());
+    ImGui::Separator();
+    ImGui::Checkbox("DLSS Super Resolution (replaces the game's TAAU, D3D12 only)", &dlss::g_options.enabled);
+    ImGui::Text("DLSS: %s", dlss::Status().c_str());
+    ImGui::Checkbox("Flip jitter X", &dlss::g_options.flipJitterX);
+    ImGui::SameLine();
+    ImGui::Checkbox("Flip jitter Y", &dlss::g_options.flipJitterY);
+    ImGui::SameLine();
+    ImGui::Checkbox("Motion vectors include jitter", &dlss::g_options.mvJittered);
     if (g_api == device_api::d3d12)
         ImGui::Text("D3D12: %zu root signatures, %zu heaps, %llu descriptor writes, %llu copied, %zu mapped buffers",
                     g_layouts.size(), g_heaps.size(), static_cast<unsigned long long>(g_descriptorWrites),
@@ -1271,6 +1420,7 @@ void DrawOverlay(effect_runtime*) {
 void Install() {
     OpenLog();
     LogGameInfo();
+    dlss::g_log = &Log;
     reshade::register_event<reshade::addon_event::init_device>(&OnInitDevice);
     reshade::register_event<reshade::addon_event::init_swapchain>(&OnInitSwapchain);
     reshade::register_event<reshade::addon_event::init_pipeline>(&OnInitPipeline);
@@ -1282,6 +1432,8 @@ void Install() {
     reshade::register_event<reshade::addon_event::copy_descriptor_tables>(&OnCopyDescriptorTables);
     reshade::register_event<reshade::addon_event::bind_descriptor_tables>(&OnBindDescriptorTables);
     reshade::register_event<reshade::addon_event::reset_command_list>(&OnResetCommandList);
+    reshade::register_event<reshade::addon_event::push_constants>(&OnPushConstants);
+    reshade::register_event<reshade::addon_event::destroy_device>(&OnDestroyDevice);
     reshade::register_event<reshade::addon_event::map_buffer_region>(&OnMapBuffer);
     reshade::register_event<reshade::addon_event::unmap_buffer_region>(&OnUnmapBuffer);
     reshade::register_event<reshade::addon_event::update_buffer_region>(&OnUpdateBuffer);

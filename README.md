@@ -1,23 +1,18 @@
 # QuarryDLSS
 
-Work towards DLSS for **The Quarry** (PC, Steam build 11105655, Unreal Engine 4.26),
-modelled on [days-gone-dlss](https://github.com/teemupynnonen/days-gone-dlss).
+DLSS for **The Quarry** (PC, Steam build 11105655, Unreal Engine 4.26), following the
+approach of [days-gone-dlss](https://github.com/teemupynnonen/days-gone-dlss).
 
-The current build is **step 1, the probe**: a ReShade add-on that changes nothing
-in the game. It only reports:
+Current build: **0.5.0, first DLSS test** (Direct3D 12 only, launch with `-dx12`).
+It's still the probe, plus:
 
-- which graphics API the game runs on (Direct3D 11 or 12), the GPU and the swap chain;
-- every *temporal* pass, meaning a shader that reads its own output from the previous
-  frame. The main TAA pass is one of these, along with Unreal's temporal SSR, depth of
-  field and light shafts;
-- the **main TAA guess** (the temporal pass with the largest output), with its render
-  resolution, output resolution and every texture it reads and writes;
-- optionally, a full list of one frame's post-process passes;
-- optionally, the constant buffers of the large temporal passes over 8 frames, to find
-  the TAA jitter.
+- the render scale is forced to 67% with TAA upsampling (the overlay slider changes it);
+- the game's TAAU compute pass is replaced by **DLSS Super Resolution**: a small pass
+  turns UE's velocity and depth into DLSS motion vectors, then NGX writes DLSS's output
+  into the TAAU's own output texture. If anything fails, the game's TAAU runs as normal;
+- overlay controls: DLSS on/off, jitter sign flips, "motion vectors include jitter".
 
-Only the texture, UAV and constant-buffer slots a shader declares are listed (read
-from its DXBC), because the D3D11 RHI leaves earlier views bound between passes.
+What the probe reports, and how the game was mapped, is in `docs/FINDINGS.md`.
 
 ## Build
 

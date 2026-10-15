@@ -44,3 +44,12 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+----------------------------------------------------------------------------
+NVIDIA DLSS SDK 310.9.1 (third_party/dlss: NGX headers and nvsdk_ngx_s.lib)
+https://github.com/NVIDIA/DLSS
+----------------------------------------------------------------------------
+Copyright (c) NVIDIA Corporation. Used under the NVIDIA RTX SDKs license, see
+third_party/dlss/LICENSE.txt. The DLSS runtime (nvngx_dlss.dll) is not part of
+this repository; build.ps1 -Install copies it from an existing install.
