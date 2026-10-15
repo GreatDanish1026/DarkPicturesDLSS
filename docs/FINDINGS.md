@@ -24,11 +24,53 @@ Probe 0.2 run on 2026-10-15 with `-dx12` in the launch options:
 - **Same shaders on both APIs.** The D3D12 shader keys match the D3D11 ones (for example
   `89b573cf3e394331`, `f0db50aa69e703c1`), so UE 4.26 ships SM5 DXBC for D3D12 too, not
   DXIL. The DXBC declaration parser works on both.
-- The probe found no temporal passes and no constants on D3D12. It doesn't decode
-  descriptor tables, and UE's D3D12 constant buffers live in persistently mapped upload
-  rings rather than Map/Unmap. The cbuffer dumps from this run are empty for that reason.
+- Probe 0.2 found no temporal passes and no constants on D3D12, because it didn't decode
+  descriptor tables. Probe 0.3 does (below).
 - This matters for frame generation: with a working D3D12 path, Streamline can run
   natively. We wouldn't need the D3D11/D3D12 shared-resource bridge that Days Gone uses.
+
+### Probe 0.3 on D3D12: bindings and jitter
+
+Run of 2026-10-15 with `-dx12` (`QuarryDLSS_cbuffers_9300.txt`, gameplay, camera moving):
+
+- The descriptor-heap mirroring works. The probe finds the same temporal passes with the
+  same shader keys as on D3D11, including the main TAA `2f606fcaa114ea67` with the same
+  slots: t0 exposure, t1 colour, t2 depth, t4 stencil, t5 history, u0 output. Its
+  first sighting (frame 67, loading) had a 1x1 dummy in t3 (velocity), so velocity is
+  only bound once the game writes it. The D3D11 gameplay frame had the real
+  RGBA16_UNORM velocity there.
+- The D3D12 adapter is identified: RTX 5080. As on D3D11, the game also creates
+  throwaway devices on the AMD iGPU and WARP.
+
+**Main TAA constants** (`2f606fcaa114ea67`):
+
+- `cb0` (29 float4) holds the TAA pass parameters:
+  - row 3 = InputSceneColorSize (3840, 2160, 1/3840, 1/2160);
+  - row 4 = (half texel, max viewport UV): 0.7405 = 1599.5/2160, the letterboxed view;
+  - row 0.y = 0.04, the current-frame weight;
+  - **row 28.xy = jitter in pixels** (`TemporalJitterPixels`), with y pointing down the
+    screen.
+- `cb1` (145 float4 declared) is UE's View uniform buffer:
+  - **row 126 = `View.TemporalAAJitter`**: .xy is this frame's jitter and .zw last
+    frame's, in clip units. Clip = (px × 2/3840, −py × 2/1600), divided by the 3840x1600
+    view rect, not the 3840x2160 texture.
+  - rows 28-31 = ViewToClip (the projection). It's reversed-Z with an infinite far plane,
+    the near plane at 10 cm (row 31.z), focal length 1.6667 (about 62° horizontal FOV)
+    and aspect 3840/1600. Jitter is folded into row 30.xy.
+  - rows 0-3 = TranslatedWorldToClip, rows 4-7 = WorldToClip. Rows 73, 85 and 90
+    carry the previous frame's jitter, so they're the previous-frame matrices.
+
+**Jitter sequence:** Halton(2,3) minus 0.5, **8 phases**, indices 1-8 then repeating:
+(0, −0.167), (−0.25, 0.167), (0.25, −0.389), (−0.375, −0.056), (0.125, 0.278),
+(−0.125, −0.278), (0.375, 0.056), (−0.4375, 0.389). That's UE's default
+`r.TemporalAASamples=8`. DLSS wants more phases at lower render scales, so the mod has
+to raise this, as Days Gone does.
+
+**Feeding DLSS:** jitter offset = `cb0` row 28.xy (pixels). Check the sign once in-game
+with the DLSS jitter debug overlay. Depth is reversed-Z (`DepthInverted`), with near =
+10 and an infinite far plane. Motion vectors are UE's velocity buffer, which only covers
+moving objects, plus camera motion reconstructed from depth and the previous-frame
+matrices in `cb1`.
 
 ## Main TAA pass (Direct3D 11)
 
