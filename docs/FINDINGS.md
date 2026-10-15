@@ -191,6 +191,18 @@ sizes):
   jump over 2 m or a turn over 15 degrees in one frame, and logs each reset with its
   reason and every overlay option change.
 
+### 0.5.4 run: DLSS looks right (2026-10-15 17:20-17:22)
+
+- User report: "it appears to be working" through a cutscene and free movement, default
+  options (no overlay changes logged), no DLSS failures, no crash.
+- **The game does raise bCameraCut on its cuts:** 30 of 31 resets were the game's flag
+  (with matching camera jumps of 34 cm to 376 m or turns up to 170 degrees). The jump
+  detector added only one reset (frame 1338, 24 m, no flag). So the missing-cut theory
+  doesn't explain the earlier 0.5.1 smearing screenshot. Its cause is unconfirmed; watch
+  for it in the same cutscene.
+- Feature thrash is still there: letterboxed <-> full-frame changes recreate the
+  feature 6 times in this run.
+
 ### Crash report from a probe 0.3.1 session
 
 A `-dx12` session at 14:57-14:58 (probe 0.3.1) crashed about 9 s after a frame dump:
