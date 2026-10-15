@@ -1,0 +1,54 @@
+# QuarryDLSS
+
+Work towards DLSS for **The Quarry** (PC, Steam build 11105655, Unreal Engine 4.26),
+modelled on [days-gone-dlss](https://github.com/teemupynnonen/days-gone-dlss).
+
+The current build is **step 1, the probe**: a ReShade add-on that changes nothing
+in the game. It only reports:
+
+- which graphics API the game runs on (Direct3D 11 or 12), the GPU and the swap chain;
+- every *temporal* pass, meaning a shader that reads its own output from the previous
+  frame. The main TAA pass is one of these, along with Unreal's temporal SSR, depth of
+  field and light shafts;
+- the **main TAA guess** (the temporal pass with the largest output), with its render
+  resolution, output resolution and every texture it reads and writes;
+- optionally, a full list of one frame's post-process passes.
+
+## Build
+
+```powershell
+.\build.ps1            # -> bin\QuarryDLSS.addon64
+.\build.ps1 -Install   # also copies it to the game's SMG026\Binaries\Win64
+```
+
+Needs LLVM-MinGW (`winget install MartinStorsjo.LLVM-MinGW.UCRT`), the same toolchain
+as AWTweaks.
+
+## Test run
+
+1. Install [ReShade](https://reshade.me) 6.8+ **with full add-on support** for
+   `SMG026\Binaries\Win64\TheQuarry-Win64-Shipping.exe` (not the `TheQuarry.exe`
+   launcher). Pick DirectX 10/11/12; you don't need any effect packs.
+2. Copy `bin\QuarryDLSS.addon64` next to that exe (or run `.\build.ps1 -Install`).
+3. For a clean result, move `BetterAntiAliasing_P.pak` and `zzzz_PerformanceTuning_P.pak`
+   out of `SMG026\Content\Paks\~mods` while testing. They likely change TAA settings.
+4. Start the game and load into gameplay. Press **Home**, then open the
+   **Add-ons → QuarryDLSS probe** section to see the API and the main TAA guess.
+5. Press **Ctrl+F11** (or the overlay button) once in a busy scene to dump a frame.
+6. Optional: try a second run with `-dx12` in the Steam launch options, to see whether
+   the Direct3D 12 renderer starts.
+
+Send back these files from `SMG026\Binaries\Win64`:
+
+- `QuarryDLSS.log` (and `QuarryDLSS.prev.log` from the `-dx12` run)
+- `QuarryDLSS_frame_<n>.txt`
+- `ReShade.log`
+
+Then step 2 can map the engine hooks (the temporal upscaler slot, jitter, camera) for this build.
+
+## Limits of the probe
+
+- On Direct3D 12, descriptor tables aren't decoded, so compute passes show no inputs.
+  Draws and render targets still show up.
+- Passes are identified by the first 8 bytes of the shader's DXBC digest. These stay the
+  same between runs of the same game build.

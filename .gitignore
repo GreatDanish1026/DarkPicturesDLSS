@@ -1,0 +1,9 @@
+# Build output (rebuild with build.ps1)
+bin/
+*.exe
+*.dll
+*.addon64
+
+# Logs and captures the add-on writes next to the game
+QuarryDLSS*.log
+QuarryDLSS_frame_*.txt

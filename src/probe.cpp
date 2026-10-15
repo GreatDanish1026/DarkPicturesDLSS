@@ -1,0 +1,712 @@
+// QuarryDLSS probe: a ReShade add-on that maps The Quarry's renderer before any
+// DLSS work. It logs which graphics API and swap chain the game uses, finds the
+// temporal anti-aliasing pass and records what that pass reads and writes.
+//
+// How the TAA pass is found: a temporal pass reads last frame's output of the
+// same shader (its history). Every post-process dispatch and full-screen draw is
+// tracked; a shader that reads a texture it wrote itself one or two frames ago
+// is a temporal pass. Unreal also uses TemporalAA.usf for SSR, depth of field
+// and light shafts, so the pass with the largest output is reported as the main
+// TAA guess.
+//
+// Output, next to the game executable:
+//   QuarryDLSS.log                 API, swap chain, every temporal pass found
+//   QuarryDLSS_frame_<n>.txt       full pass list of one frame (Ctrl+F11 or the overlay)
+//
+// Descriptor tables are not decoded, so on Direct3D 12 only render targets are
+// seen and compute passes report no inputs. Direct3D 11 is fully covered.
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <d3d11.h>
+#include <dxgi.h>
+
+#define ImTextureID ImU64
+#include <imgui.h>
+#include <reshade.hpp>
+
+#include <algorithm>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "version.h"
+
+extern "C" __declspec(dllexport) const char* NAME = "QuarryDLSS probe";
+extern "C" __declspec(dllexport) const char* DESCRIPTION =
+    "Logs The Quarry's graphics API and its temporal anti-aliasing pass (inputs and outputs).";
+
+namespace {
+
+using namespace reshade::api;
+
+constexpr uint32_t kMaxSrv = 32;
+constexpr uint32_t kMaxUav = 8;
+constexpr uint32_t kMaxRtv = 8;
+constexpr uint64_t kGeometryKey = 0;  // writer key for scene geometry draws
+
+// ---------------------------------------------------------------- logging
+
+std::mutex g_mutex;  // guards everything below; events arrive on the RHI thread
+FILE* g_log = nullptr;
+std::wstring g_dir;  // game executable folder, with trailing slash
+
+void Log(const char* fmt, ...) {
+    char buf[2048];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (g_log) {
+        SYSTEMTIME t;
+        GetLocalTime(&t);
+        fprintf(g_log, "%02u:%02u:%02u.%03u %s\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, buf);
+        fflush(g_log);
+    }
+}
+
+void OpenLog() {
+    wchar_t path[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (!n || n >= MAX_PATH) return;
+    g_dir.assign(path, n);
+    g_dir.resize(g_dir.find_last_of(L"\\/") + 1);
+    std::wstring log = g_dir + L"QuarryDLSS.log";
+    std::wstring prev = g_dir + L"QuarryDLSS.prev.log";
+    MoveFileExW(log.c_str(), prev.c_str(), MOVEFILE_REPLACE_EXISTING);
+    g_log = _wfopen(log.c_str(), L"w");
+}
+
+std::string Narrow(const wchar_t* s) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, s, -1, nullptr, 0, nullptr, nullptr);
+    std::string out(n > 0 ? n - 1 : 0, '\0');
+    if (n > 1) WideCharToMultiByte(CP_UTF8, 0, s, -1, out.data(), n, nullptr, nullptr);
+    return out;
+}
+
+// Executable identity, for the per-build table the real mod will need.
+void LogGameInfo() {
+    wchar_t path[MAX_PATH];
+    GetModuleFileNameW(nullptr, path, MAX_PATH);
+    auto base = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
+    auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    Log("QuarryDLSS probe %s", QDLSS_VERSION);
+    Log("exe: %s", Narrow(path).c_str());
+    Log("exe: PE timestamp 0x%08lx, image size 0x%lx", static_cast<unsigned long>(nt->FileHeader.TimeDateStamp),
+        static_cast<unsigned long>(nt->OptionalHeader.SizeOfImage));
+    Log("command line: %s", Narrow(GetCommandLineW()).c_str());
+}
+
+const char* FormatName(format f) {
+    switch (static_cast<uint32_t>(f)) {
+        case 0: return "unknown";
+        case 2: return "RGBA32F";
+        case 9: return "RGBA16_TYPELESS";
+        case 10: return "RGBA16F";
+        case 11: return "RGBA16_UNORM";
+        case 15: return "RG32_TYPELESS";
+        case 16: return "RG32F";
+        case 19: return "R32G8X24_TYPELESS(depth)";
+        case 20: return "D32F_S8";
+        case 21: return "R32F_X8(depth)";
+        case 22: return "X32_G8(stencil)";
+        case 23: return "RGB10A2_TYPELESS";
+        case 24: return "RGB10A2_UNORM";
+        case 26: return "R11G11B10F";
+        case 27: return "RGBA8_TYPELESS";
+        case 28: return "RGBA8_UNORM";
+        case 29: return "RGBA8_SRGB";
+        case 33: return "RG16_TYPELESS";
+        case 34: return "RG16F";
+        case 35: return "RG16_UNORM";
+        case 39: return "R32_TYPELESS";
+        case 40: return "D32F";
+        case 41: return "R32F";
+        case 42: return "R32_UINT";
+        case 44: return "R24G8_TYPELESS(depth)";
+        case 45: return "D24_S8";
+        case 46: return "R24_X8(depth)";
+        case 47: return "X24_G8(stencil)";
+        case 48: return "RG8_TYPELESS";
+        case 49: return "RG8_UNORM";
+        case 53: return "R16_TYPELESS";
+        case 54: return "R16F";
+        case 55: return "D16";
+        case 56: return "R16_UNORM";
+        case 57: return "R16_UINT";
+        case 60: return "R8_TYPELESS";
+        case 61: return "R8_UNORM";
+        case 62: return "R8_UINT";
+        case 87: return "BGRA8_UNORM";
+        case 90: return "BGRA8_TYPELESS";
+        case 91: return "BGRA8_SRGB";
+        default: {
+            static thread_local char buf[16];
+            snprintf(buf, sizeof(buf), "fmt%u", static_cast<uint32_t>(f));
+            return buf;
+        }
+    }
+}
+
+const char* ApiName(device_api api) {
+    switch (api) {
+        case device_api::d3d9: return "Direct3D 9";
+        case device_api::d3d10: return "Direct3D 10";
+        case device_api::d3d11: return "Direct3D 11";
+        case device_api::d3d12: return "Direct3D 12";
+        case device_api::opengl: return "OpenGL";
+        case device_api::vulkan: return "Vulkan";
+    }
+    return "unknown";
+}
+
+// ---------------------------------------------------------------- shaders
+
+// Shader identity: the first 8 bytes of the DXBC container digest (stable across
+// runs and between D3D11 and the shader cache), or FNV-1a for anything else.
+uint64_t ShaderKey(const shader_desc* sd) {
+    if (!sd || !sd->code || !sd->code_size) return 0;
+    auto p = static_cast<const uint8_t*>(sd->code);
+    if (sd->code_size >= 20 && memcmp(p, "DXBC", 4) == 0) {
+        uint64_t k;
+        memcpy(&k, p + 4, 8);
+        return k ? k : 1;
+    }
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < sd->code_size; ++i) h = (h ^ p[i]) * 1099511628211ull;
+    return h ? h : 1;
+}
+
+struct PipelineInfo {
+    uint64_t vs = 0, ps = 0, cs = 0;
+};
+std::unordered_map<uint64_t, PipelineInfo> g_pipelines;
+
+// ---------------------------------------------------------------- per-context state
+
+struct ContextState {
+    uint64_t vs = 0, ps = 0, cs = 0;
+    resource_view psSrv[kMaxSrv] = {};
+    resource_view csSrv[kMaxSrv] = {};
+    resource_view csUav[kMaxUav] = {};
+    resource_view rtv[kMaxRtv] = {};
+    uint32_t rtvCount = 0;
+    resource_view dsv = {};
+    bool targetsDirty = true;
+    viewport vp = {};
+};
+std::unordered_map<command_list*, ContextState> g_contexts;
+
+// Who last wrote each resource: shader key (0 = geometry), frame and pass number.
+struct Writer {
+    uint64_t key;
+    uint64_t frame;
+    uint32_t pass;
+};
+std::unordered_map<uint64_t, Writer> g_writers;
+
+// ---------------------------------------------------------------- frame state
+
+uint64_t g_frame = 0;
+uint32_t g_pass = 0;           // post-process passes so far this frame
+uint32_t g_geometryRun = 0;    // geometry draws since the last logged pass
+uint64_t g_dumpFrame = 0;      // frame to write out in full (0 = none)
+std::vector<std::string> g_dump;
+std::string g_lastDumpFile;
+
+device_api g_api = device_api::d3d11;
+bool g_haveDevice = false;
+std::string g_adapter;
+std::string g_swapchain;  // description of the current back buffer
+
+// A shader found reading its own previous output.
+struct Candidate {
+    uint64_t key = 0;
+    bool compute = false;
+    uint64_t hits = 0;
+    uint64_t firstFrame = 0, lastFrame = 0;
+    uint32_t outW = 0, outH = 0;    // largest output
+    uint32_t inW = 0, inH = 0;      // largest input that is not history
+    std::string io;                 // latest inputs/outputs, one per line
+};
+std::unordered_map<uint64_t, Candidate> g_candidates;
+uint64_t g_mainKey = 0;
+uint32_t g_mainInW = 0, g_mainInH = 0, g_mainOutW = 0, g_mainOutH = 0;
+
+// ---------------------------------------------------------------- pass analysis
+
+struct Binding {
+    char slot[8];
+    resource res;
+    resource_desc desc;
+    format viewFormat;
+    const Writer* writer;  // null when nothing tracked wrote it
+};
+
+bool ResolveView(device* dev, resource_view view, Binding& b) {
+    if (!view.handle) return false;
+    b.res = dev->get_resource_from_view(view);
+    if (!b.res.handle) return false;
+    b.desc = dev->get_resource_desc(b.res);
+    b.viewFormat = dev->get_resource_view_desc(view).format;
+    auto it = g_writers.find(b.res.handle);
+    b.writer = it == g_writers.end() ? nullptr : &it->second;
+    return true;
+}
+
+bool IsHistory(const Binding& b, uint64_t key) {
+    return b.writer && key != kGeometryKey && b.writer->key == key && b.writer->frame < g_frame &&
+           g_frame - b.writer->frame <= 2;
+}
+
+std::string Describe(const Binding& b, uint64_t key) {
+    char buf[256];
+    const auto& t = b.desc.texture;
+    int n;
+    if (b.desc.type == resource_type::buffer)
+        n = snprintf(buf, sizeof(buf), "%-4s buffer %llu bytes", b.slot,
+                     static_cast<unsigned long long>(b.desc.buffer.size));
+    else
+        n = snprintf(buf, sizeof(buf), "%-4s %ux%u %s%s%s mips=%u res=%llx", b.slot, t.width, t.height,
+                     FormatName(b.viewFormat), b.viewFormat != t.format ? " of " : "",
+                     b.viewFormat != t.format ? FormatName(t.format) : "", t.levels,
+                     static_cast<unsigned long long>(b.res.handle));
+    std::string s(buf, n > 0 ? std::min<size_t>(n, sizeof(buf) - 1) : 0);
+    if (IsHistory(b, key)) {
+        s += "  <- HISTORY (own output, last frame)";
+    } else if (b.writer && b.writer->frame == g_frame) {
+        if (b.writer->key == kGeometryKey)
+            snprintf(buf, sizeof(buf), "  <- scene geometry");
+        else
+            snprintf(buf, sizeof(buf), "  <- pass #%u (%016llx)", b.writer->pass,
+                     static_cast<unsigned long long>(b.writer->key));
+        s += buf;
+    }
+    return s;
+}
+
+void MarkWritten(resource res, uint64_t key) {
+    if (res.handle) g_writers[res.handle] = {key, g_frame, g_pass};
+}
+
+// A dispatch or full-screen draw: work out its inputs and outputs, flag history
+// reads, and record what it writes.
+void OnPass(command_list* cmd, bool compute, const char* what) {
+    auto& st = g_contexts[cmd];
+    const uint64_t key = compute ? st.cs : st.ps;
+    device* dev = cmd->get_device();
+
+    std::vector<Binding> in, out;
+    const resource_view* srv = compute ? st.csSrv : st.psSrv;
+    for (uint32_t i = 0; i < kMaxSrv; ++i) {
+        Binding b{};
+        if (ResolveView(dev, srv[i], b)) {
+            snprintf(b.slot, sizeof(b.slot), "t%u", i);
+            in.push_back(b);
+        }
+    }
+    if (compute) {
+        for (uint32_t i = 0; i < kMaxUav; ++i) {
+            Binding b{};
+            if (ResolveView(dev, st.csUav[i], b)) {
+                snprintf(b.slot, sizeof(b.slot), "u%u", i);
+                out.push_back(b);
+            }
+        }
+    } else {
+        for (uint32_t i = 0; i < st.rtvCount && i < kMaxRtv; ++i) {
+            Binding b{};
+            if (ResolveView(dev, st.rtv[i], b)) {
+                snprintf(b.slot, sizeof(b.slot), "rt%u", i);
+                out.push_back(b);
+            }
+        }
+    }
+
+    bool history = false;
+    uint32_t inW = 0, inH = 0, outW = 0, outH = 0;
+    for (const auto& b : in) {
+        if (IsHistory(b, key)) {
+            history = true;
+        } else if (b.desc.type != resource_type::buffer &&
+                   uint64_t(b.desc.texture.width) * b.desc.texture.height > uint64_t(inW) * inH) {
+            inW = b.desc.texture.width;
+            inH = b.desc.texture.height;
+        }
+    }
+    for (const auto& b : out)
+        if (b.desc.type != resource_type::buffer &&
+            uint64_t(b.desc.texture.width) * b.desc.texture.height > uint64_t(outW) * outH) {
+            outW = b.desc.texture.width;
+            outH = b.desc.texture.height;
+        }
+
+    const bool dumping = g_dumpFrame && g_frame == g_dumpFrame;
+    if (history || dumping) {
+        std::string io;
+        char head[160];
+        snprintf(head, sizeof(head), "%s %s %016llx%s", what, compute ? "CS" : "PS",
+                 static_cast<unsigned long long>(key), history ? "  [TEMPORAL]" : "");
+        if (!compute)
+            snprintf(head + strlen(head), sizeof(head) - strlen(head), "  viewport %.0fx%.0f+%.0f+%.0f",
+                     st.vp.width, st.vp.height, st.vp.x, st.vp.y);
+        for (const auto& b : in) io += "    in  " + Describe(b, key) + "\n";
+        for (const auto& b : out) io += "    out " + Describe(b, key) + "\n";
+
+        if (dumping) {
+            char line[64];
+            if (g_geometryRun) {
+                snprintf(line, sizeof(line), "      (%u geometry draws)", g_geometryRun);
+                g_dump.push_back(line);
+            }
+            snprintf(line, sizeof(line), "#%-4u ", g_pass);
+            g_dump.push_back(line + std::string(head) + "\n" + io);
+        }
+        if (history && key) {
+            auto& c = g_candidates[key];
+            if (!c.hits) {
+                c.key = key;
+                c.compute = compute;
+                c.firstFrame = g_frame;
+                Log("temporal pass found at frame %llu, pass #%u: %s\n%s",
+                    static_cast<unsigned long long>(g_frame), g_pass, head, io.c_str());
+            }
+            ++c.hits;
+            c.lastFrame = g_frame;
+            c.outW = outW;
+            c.outH = outH;
+            c.inW = inW;
+            c.inH = inH;
+            c.io = std::string(head) + "\n" + io;
+        }
+    }
+    g_geometryRun = 0;
+
+    for (const auto& b : out) MarkWritten(b.res, key);
+    ++g_pass;
+}
+
+void OnGeometryDraw(command_list* cmd) {
+    auto& st = g_contexts[cmd];
+    ++g_geometryRun;
+    if (!st.targetsDirty) return;
+    st.targetsDirty = false;
+    device* dev = cmd->get_device();
+    for (uint32_t i = 0; i < st.rtvCount && i < kMaxRtv; ++i)
+        if (st.rtv[i].handle) MarkWritten(dev->get_resource_from_view(st.rtv[i]), kGeometryKey);
+    if (st.dsv.handle) MarkWritten(dev->get_resource_from_view(st.dsv), kGeometryKey);
+}
+
+// The temporal pass with the largest output is taken as the main TAA.
+void UpdateMainGuess() {
+    const Candidate* best = nullptr;
+    for (const auto& [k, c] : g_candidates)
+        if (c.lastFrame + 2 >= g_frame && (!best || uint64_t(c.outW) * c.outH > uint64_t(best->outW) * best->outH))
+            best = &c;
+    if (!best) return;
+    if (best->key == g_mainKey && best->inW == g_mainInW && best->inH == g_mainInH && best->outW == g_mainOutW &&
+        best->outH == g_mainOutH)
+        return;
+    g_mainKey = best->key;
+    g_mainInW = best->inW;
+    g_mainInH = best->inH;
+    g_mainOutW = best->outW;
+    g_mainOutH = best->outH;
+    Log("main TAA guess: %s %016llx, input %ux%u -> output %ux%u (%.1f%% screen percentage)\n%s",
+        best->compute ? "CS" : "PS", static_cast<unsigned long long>(best->key), best->inW, best->inH, best->outW,
+        best->outH, best->outW ? 100.0 * best->inW / best->outW : 0.0, best->io.c_str());
+}
+
+void WriteDump() {
+    wchar_t name[64];
+    swprintf(name, 64, L"QuarryDLSS_frame_%llu.txt", static_cast<unsigned long long>(g_dumpFrame));
+    std::wstring path = g_dir + name;
+    if (FILE* f = _wfopen(path.c_str(), L"w")) {
+        fprintf(f, "QuarryDLSS probe %s - frame %llu\nAPI: %s\nadapter: %s\nswap chain: %s\n\n", QDLSS_VERSION,
+                static_cast<unsigned long long>(g_dumpFrame), ApiName(g_api), g_adapter.c_str(),
+                g_swapchain.c_str());
+        fprintf(f, "Post-process passes in order (dispatches and full-screen draws). Inputs are\n"
+                   "marked with the pass that wrote them this frame; HISTORY marks a texture the\n"
+                   "same shader wrote last frame.\n\n");
+        for (const auto& l : g_dump) fprintf(f, "%s\n", l.c_str());
+        if (g_geometryRun) fprintf(f, "      (%u geometry draws)\n", g_geometryRun);
+        fclose(f);
+        g_lastDumpFile = Narrow(name);
+        Log("wrote %s (%zu entries)", g_lastDumpFile.c_str(), g_dump.size());
+    }
+    g_dump.clear();
+    g_dumpFrame = 0;
+}
+
+// ---------------------------------------------------------------- events
+
+void OnInitDevice(device* dev) {
+    std::lock_guard lock(g_mutex);
+    g_api = dev->get_api();
+    g_haveDevice = true;
+    Log("device created: %s", ApiName(g_api));
+    if (g_api == device_api::d3d11) {
+        auto d3d = reinterpret_cast<ID3D11Device*>(dev->get_native());
+        D3D_FEATURE_LEVEL fl = d3d->GetFeatureLevel();
+        Log("D3D11 feature level %x.%x", (fl >> 12) & 0xf, (fl >> 8) & 0xf);
+        IDXGIDevice* dxgi = nullptr;
+        if (SUCCEEDED(d3d->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgi)))) {
+            IDXGIAdapter* adapter = nullptr;
+            if (SUCCEEDED(dxgi->GetAdapter(&adapter))) {
+                DXGI_ADAPTER_DESC ad;
+                if (SUCCEEDED(adapter->GetDesc(&ad))) {
+                    g_adapter = Narrow(ad.Description);
+                    Log("adapter: %s, %llu MB video memory", g_adapter.c_str(),
+                        static_cast<unsigned long long>(ad.DedicatedVideoMemory >> 20));
+                }
+                adapter->Release();
+            }
+            dxgi->Release();
+        }
+    } else if (g_api == device_api::d3d12) {
+        Log("D3D12: descriptor tables are not decoded by this probe, so compute passes will show no "
+            "inputs. Render-target writes are still tracked.");
+    }
+}
+
+void OnInitSwapchain(swapchain* sc, bool resize) {
+    std::lock_guard lock(g_mutex);
+    device* dev = sc->get_device();
+    resource bb = sc->get_back_buffer(0);
+    auto d = dev->get_resource_desc(bb);
+    char buf[160];
+    snprintf(buf, sizeof(buf), "%ux%u %s, %u buffers", d.texture.width, d.texture.height, FormatName(d.texture.format),
+             sc->get_back_buffer_count());
+    g_swapchain = buf;
+    Log("swap chain %s: %s (%s)", resize ? "resized" : "created", g_swapchain.c_str(), ApiName(dev->get_api()));
+}
+
+void OnInitPipeline(device*, pipeline_layout, uint32_t count, const pipeline_subobject* subs, pipeline p) {
+    PipelineInfo info;
+    for (uint32_t i = 0; i < count; ++i) {
+        auto sd = static_cast<const shader_desc*>(subs[i].data);
+        switch (subs[i].type) {
+            case pipeline_subobject_type::vertex_shader: info.vs = ShaderKey(sd); break;
+            case pipeline_subobject_type::pixel_shader: info.ps = ShaderKey(sd); break;
+            case pipeline_subobject_type::compute_shader: info.cs = ShaderKey(sd); break;
+            default: break;
+        }
+    }
+    if (!info.vs && !info.ps && !info.cs) return;
+    std::lock_guard lock(g_mutex);
+    g_pipelines[p.handle] = info;
+}
+
+void OnDestroyPipeline(device*, pipeline p) {
+    std::lock_guard lock(g_mutex);
+    g_pipelines.erase(p.handle);
+}
+
+void OnDestroyResource(device*, resource r) {
+    std::lock_guard lock(g_mutex);
+    g_writers.erase(r.handle);
+}
+
+void OnBindPipeline(command_list* cmd, pipeline_stage stages, pipeline p) {
+    std::lock_guard lock(g_mutex);
+    auto& st = g_contexts[cmd];
+    PipelineInfo info;
+    if (auto it = g_pipelines.find(p.handle); it != g_pipelines.end()) info = it->second;
+    auto has = [&](pipeline_stage s) { return (static_cast<uint32_t>(stages) & static_cast<uint32_t>(s)) != 0; };
+    if (has(pipeline_stage::compute_shader)) st.cs = info.cs;
+    if (has(pipeline_stage::pixel_shader)) st.ps = info.ps;
+    if (has(pipeline_stage::vertex_shader)) st.vs = info.vs;
+}
+
+void OnPushDescriptors(command_list* cmd, shader_stage stages, pipeline_layout, uint32_t,
+                       const descriptor_table_update& u) {
+    const bool cs = (static_cast<uint32_t>(stages) & static_cast<uint32_t>(shader_stage::compute)) != 0;
+    const bool ps = (static_cast<uint32_t>(stages) & static_cast<uint32_t>(shader_stage::pixel)) != 0;
+    if (!cs && !ps) return;
+    resource_view* dst = nullptr;
+    uint32_t cap = 0;
+    std::lock_guard lock(g_mutex);
+    auto& st = g_contexts[cmd];
+    switch (u.type) {
+        case descriptor_type::shader_resource_view:
+        case descriptor_type::buffer_shader_resource_view:
+            dst = cs ? st.csSrv : st.psSrv;
+            cap = kMaxSrv;
+            break;
+        case descriptor_type::unordered_access_view:
+        case descriptor_type::buffer_unordered_access_view:
+            if (!cs) return;
+            dst = st.csUav;
+            cap = kMaxUav;
+            break;
+        default: return;
+    }
+    auto views = static_cast<const resource_view*>(u.descriptors);
+    for (uint32_t i = 0; i < u.count && u.binding + i < cap; ++i) dst[u.binding + i] = views ? views[i] : resource_view{};
+}
+
+void OnBindTargets(command_list* cmd, uint32_t count, const resource_view* rtvs, resource_view dsv) {
+    std::lock_guard lock(g_mutex);
+    auto& st = g_contexts[cmd];
+    st.rtvCount = std::min(count, kMaxRtv);
+    for (uint32_t i = 0; i < kMaxRtv; ++i) st.rtv[i] = i < st.rtvCount ? rtvs[i] : resource_view{};
+    st.dsv = dsv;
+    st.targetsDirty = true;
+}
+
+void OnBindViewports(command_list* cmd, uint32_t first, uint32_t count, const viewport* vps) {
+    if (first != 0 || count == 0) return;
+    std::lock_guard lock(g_mutex);
+    g_contexts[cmd].vp = vps[0];
+}
+
+// Unreal draws post-process passes as one triangle or a two-triangle quad.
+bool IsFullscreen(uint32_t count, uint32_t instances) { return count <= 6 && instances <= 1; }
+
+bool OnDraw(command_list* cmd, uint32_t vertices, uint32_t instances, uint32_t, uint32_t) {
+    std::lock_guard lock(g_mutex);
+    if (IsFullscreen(vertices, instances) && g_contexts[cmd].rtvCount)
+        OnPass(cmd, false, "draw");
+    else
+        OnGeometryDraw(cmd);
+    return false;
+}
+
+bool OnDrawIndexed(command_list* cmd, uint32_t indices, uint32_t instances, uint32_t, int32_t, uint32_t) {
+    std::lock_guard lock(g_mutex);
+    if (IsFullscreen(indices, instances) && g_contexts[cmd].rtvCount)
+        OnPass(cmd, false, "draw");
+    else
+        OnGeometryDraw(cmd);
+    return false;
+}
+
+bool OnDispatch(command_list* cmd, uint32_t x, uint32_t y, uint32_t z) {
+    std::lock_guard lock(g_mutex);
+    char what[48];
+    snprintf(what, sizeof(what), "dispatch %ux%ux%u", x, y, z);
+    OnPass(cmd, true, what);
+    return false;
+}
+
+bool OnCopyResource(command_list* cmd, resource src, resource dst) {
+    std::lock_guard lock(g_mutex);
+    if (auto it = g_writers.find(src.handle); it != g_writers.end()) g_writers[dst.handle] = it->second;
+    if (g_dumpFrame && g_frame == g_dumpFrame) {
+        auto d = cmd->get_device()->get_resource_desc(dst);
+        char line[160];
+        snprintf(line, sizeof(line), "      copy %llx -> %llx (%ux%u %s)", static_cast<unsigned long long>(src.handle),
+                 static_cast<unsigned long long>(dst.handle), d.texture.width, d.texture.height,
+                 FormatName(d.texture.format));
+        g_dump.push_back(line);
+    }
+    return false;
+}
+
+void OnPresent(command_queue*, swapchain*, const rect*, const rect*, uint32_t, const rect*) {
+    std::lock_guard lock(g_mutex);
+    if (g_dumpFrame && g_frame == g_dumpFrame) WriteDump();
+    UpdateMainGuess();
+    ++g_frame;
+    g_pass = 0;
+    g_geometryRun = 0;
+}
+
+void RequestDump() {
+    if (!g_dumpFrame) {
+        g_dumpFrame = g_frame + 1;
+        g_dump.clear();
+    }
+}
+
+void OnReshadePresent(effect_runtime* rt) {
+    if (rt->is_key_down(VK_CONTROL) && rt->is_key_pressed(VK_F11)) {
+        std::lock_guard lock(g_mutex);
+        RequestDump();
+    }
+}
+
+void DrawOverlay(effect_runtime*) {
+    std::lock_guard lock(g_mutex);
+    ImGui::Text("API: %s", g_haveDevice ? ApiName(g_api) : "(no device yet)");
+    if (!g_adapter.empty()) ImGui::Text("Adapter: %s", g_adapter.c_str());
+    ImGui::Text("Swap chain: %s", g_swapchain.c_str());
+    ImGui::Text("Frame %llu", static_cast<unsigned long long>(g_frame));
+    ImGui::Separator();
+    if (g_mainKey) {
+        ImGui::Text("Main TAA guess: %016llx", static_cast<unsigned long long>(g_mainKey));
+        ImGui::Text("Input %ux%u -> output %ux%u (%.1f%%)", g_mainInW, g_mainInH, g_mainOutW, g_mainOutH,
+                    g_mainOutW ? 100.0 * g_mainInW / g_mainOutW : 0.0);
+    } else {
+        ImGui::TextUnformatted("No temporal pass found yet. Load into gameplay.");
+    }
+    ImGui::Separator();
+
+    std::vector<const Candidate*> list;
+    for (const auto& [k, c] : g_candidates) list.push_back(&c);
+    std::sort(list.begin(), list.end(), [](const Candidate* a, const Candidate* b) {
+        return uint64_t(a->outW) * a->outH > uint64_t(b->outW) * b->outH;
+    });
+    ImGui::Text("Temporal passes (%zu):", list.size());
+    for (const Candidate* c : list) {
+        bool live = c->lastFrame + 2 >= g_frame;
+        ImGui::Text("%s %s %016llx  %ux%u -> %ux%u  hits %llu", live ? "*" : " ", c->compute ? "CS" : "PS",
+                    static_cast<unsigned long long>(c->key), c->inW, c->inH, c->outW, c->outH,
+                    static_cast<unsigned long long>(c->hits));
+    }
+    ImGui::Separator();
+    if (ImGui::Button(g_dumpFrame ? "Capturing..." : "Dump next frame (Ctrl+F11)")) RequestDump();
+    if (!g_lastDumpFile.empty()) ImGui::Text("Last dump: %s", g_lastDumpFile.c_str());
+    ImGui::TextUnformatted("Log: QuarryDLSS.log next to the game executable.");
+}
+
+void Install() {
+    OpenLog();
+    LogGameInfo();
+    reshade::register_event<reshade::addon_event::init_device>(&OnInitDevice);
+    reshade::register_event<reshade::addon_event::init_swapchain>(&OnInitSwapchain);
+    reshade::register_event<reshade::addon_event::init_pipeline>(&OnInitPipeline);
+    reshade::register_event<reshade::addon_event::destroy_pipeline>(&OnDestroyPipeline);
+    reshade::register_event<reshade::addon_event::destroy_resource>(&OnDestroyResource);
+    reshade::register_event<reshade::addon_event::bind_pipeline>(&OnBindPipeline);
+    reshade::register_event<reshade::addon_event::push_descriptors>(&OnPushDescriptors);
+    reshade::register_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(&OnBindTargets);
+    reshade::register_event<reshade::addon_event::bind_viewports>(&OnBindViewports);
+    reshade::register_event<reshade::addon_event::draw>(&OnDraw);
+    reshade::register_event<reshade::addon_event::draw_indexed>(&OnDrawIndexed);
+    reshade::register_event<reshade::addon_event::dispatch>(&OnDispatch);
+    reshade::register_event<reshade::addon_event::copy_resource>(&OnCopyResource);
+    reshade::register_event<reshade::addon_event::present>(&OnPresent);
+    reshade::register_event<reshade::addon_event::reshade_present>(&OnReshadePresent);
+    reshade::register_overlay("QuarryDLSS probe", &DrawOverlay);
+}
+
+void Uninstall() {
+    reshade::unregister_overlay("QuarryDLSS probe", &DrawOverlay);
+    if (g_log) {
+        Log("unloading");
+        fclose(g_log);
+        g_log = nullptr;
+    }
+}
+
+}  // namespace
+
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
+    switch (reason) {
+        case DLL_PROCESS_ATTACH:
+            if (!reshade::register_addon(module)) return FALSE;
+            Install();
+            break;
+        case DLL_PROCESS_DETACH:
+            Uninstall();
+            reshade::unregister_addon(module);  // also removes the event callbacks
+            break;
+    }
+    return TRUE;
+}
