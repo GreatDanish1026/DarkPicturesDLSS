@@ -3,5 +3,5 @@
 
 #define QDLSS_VERSION_MAJOR 0
 #define QDLSS_VERSION_MINOR 5
-#define QDLSS_VERSION_PATCH 0
-#define QDLSS_VERSION "0.5.0-dlss-test"
+#define QDLSS_VERSION_PATCH 1
+#define QDLSS_VERSION "0.5.1-dlss-test"

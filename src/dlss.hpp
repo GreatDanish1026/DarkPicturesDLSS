@@ -36,6 +36,11 @@ struct Options {
 };
 extern Options g_options;
 
+// Every present: NGX init and DLSS feature (re)creation happen here, on ReShade's
+// immediate command list, never inside the game's command lists.
+void Tick(effect_runtime* runtime);
+// At a TAAU dispatch: records DLSS only if a feature for exactly these sizes exists;
+// otherwise asks Tick for one and returns skipped without touching the command list.
 Result Evaluate(const Frame& f);
 void OnDestroyResource(resource r);  // drops cached views of game textures
 void Shutdown(device* dev);

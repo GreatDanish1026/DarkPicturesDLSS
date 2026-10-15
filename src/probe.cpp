@@ -1125,9 +1125,15 @@ bool BuildDlssFrame(command_list* cmd, const ContextState& st, dlss::Frame& f, s
     f.reset = cameraCut != 0;
     memcpy(f.clipToPrevClip, row(cb1, 122), sizeof(f.clipToPrevClip));
 
+    // During loading the game binds 1x1 placeholders (e.g. for velocity): every input
+    // must cover the render rect.
     const auto colorDesc = dev->get_resource_desc(f.color);
+    const auto depthDesc = dev->get_resource_desc(f.depth);
+    const auto velocityDesc = dev->get_resource_desc(f.velocity);
     const auto outDesc = dev->get_resource_desc(f.output);
-    if (f.renderW == 0 || f.renderH == 0 || f.renderW > colorDesc.texture.width || f.renderH > colorDesc.texture.height ||
+    const uint32_t minW = std::min({colorDesc.texture.width, depthDesc.texture.width, velocityDesc.texture.width});
+    const uint32_t minH = std::min({colorDesc.texture.height, depthDesc.texture.height, velocityDesc.texture.height});
+    if (f.renderW == 0 || f.renderH == 0 || f.renderW > minW || f.renderH > minH ||
         f.outW == 0 || f.outH == 0 || f.outX + f.outW > outDesc.texture.width || f.outY + f.outH > outDesc.texture.height ||
         std::abs(f.jitterX) > 0.5f || std::abs(f.jitterY) > 0.5f) {
         char buf[160];
@@ -1350,6 +1356,7 @@ void OnReshadePresent(effect_runtime* rt) {
     std::lock_guard lock(g_mutex);
     UpdateSwapchainInfo(rt);
     ApplyRenderScale();
+    dlss::Tick(rt);
     if (rt->is_key_down(VK_CONTROL) && rt->is_key_pressed(VK_F9)) RequestDump();  // not F11: UE toggles fullscreen on it
     if (rt->is_key_down(VK_CONTROL) && rt->is_key_pressed(VK_F10)) RequestCbDump();
 }

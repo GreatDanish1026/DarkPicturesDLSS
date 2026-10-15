@@ -49,13 +49,25 @@ device* g_device = nullptr;
 ID3D12Device* g_d3d = nullptr;
 NVSDK_NGX_Parameter* g_params = nullptr;
 
+// The DLSS feature is only ever created at present time, on ReShade's immediate
+// command list (Tick). A TAAU dispatch whose sizes don't match it records nothing:
+// it just asks for that feature (g_wanted) and the game's TAAU runs that frame.
+struct FeatureKey {
+    uint32_t renderW = 0, renderH = 0, outW = 0, outH = 0;
+    bool jittered = false;
+    bool operator==(const FeatureKey& o) const {
+        return renderW == o.renderW && renderH == o.renderH && outW == o.outW && outH == o.outH &&
+               jittered == o.jittered;
+    }
+    bool operator!=(const FeatureKey& o) const { return !(*this == o); }
+};
 NVSDK_NGX_Handle* g_feature = nullptr;
-uint32_t g_featW = 0, g_featH = 0, g_featOutW = 0, g_featOutH = 0;
-bool g_featJittered = false;
+FeatureKey g_featureKey;  // what g_feature was created for
+FeatureKey g_wanted;      // what the last TAAU dispatch needed
+FeatureKey g_failedKey;   // last creation that failed (not retried)
 
 pipeline_layout g_layout = {};
 pipeline g_pso = {};
-bool g_pipelineFailed = false;
 
 resource g_motion = {}, g_depth = {};
 resource_view g_motionUav = {}, g_depthUav = {};
@@ -76,6 +88,13 @@ void SetStatus(const char* fmt, ...) {
     g_status = buf;
 }
 
+// NGX's own log lines, into QuarryDLSS.log (may be called from NGX's threads).
+void NVSDK_CONV OnNgxLog(const char* message, NVSDK_NGX_Logging_Level, NVSDK_NGX_Feature) {
+    std::string m = message ? message : "";
+    while (!m.empty() && (m.back() == '\n' || m.back() == '\r')) m.pop_back();
+    LOG("ngx: %s", m.c_str());
+}
+
 bool InitNgx(device* dev) {
     g_device = dev;
     g_d3d = reinterpret_cast<ID3D12Device*>(dev->get_native());
@@ -84,8 +103,12 @@ bool InitNgx(device* dev) {
     std::wstring dir(path, n);
     dir.resize(dir.find_last_of(L"\\/") + 1);
 
-    NVSDK_NGX_Result r =
-        NVSDK_NGX_D3D12_Init_with_ProjectID(kProjectId, NVSDK_NGX_ENGINE_TYPE_UNREAL, "4.26", dir.c_str(), g_d3d);
+    NVSDK_NGX_FeatureCommonInfo info = {};
+    info.LoggingInfo.LoggingCallback = &OnNgxLog;
+    info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_ON;
+    info.LoggingInfo.DisableOtherLoggingSinks = true;
+    NVSDK_NGX_Result r = NVSDK_NGX_D3D12_Init_with_ProjectID(kProjectId, NVSDK_NGX_ENGINE_TYPE_UNREAL, "4.26",
+                                                             dir.c_str(), g_d3d, &info);
     if (NVSDK_NGX_FAILED(r)) {
         SetStatus("NGX init failed (0x%08x); is nvngx_dlss.dll next to the game exe?", static_cast<unsigned>(r));
         return false;
@@ -187,56 +210,70 @@ NVSDK_NGX_PerfQuality_Value QualityFor(float fraction) {
     return NVSDK_NGX_PerfQuality_Value_UltraPerformance;
 }
 
-bool EnsureFeature(ID3D12GraphicsCommandList* list, const Frame& f) {
-    if (g_feature && g_featW == f.renderW && g_featH == f.renderH && g_featOutW == f.outW && g_featOutH == f.outH &&
-        g_featJittered == g_options.mvJittered)
-        return true;
+
+// Present time only, on ReShade's immediate command list for the game's queue, so a
+// failure never leaves anything in the game's own command lists.
+void CreateFeature(command_queue* queue, const FeatureKey& key) {
     if (g_feature) {
-        // Sizes rarely change (window resize); the old feature may still be in flight, but NGX
-        // defers the actual release until its GPU work is done.
+        queue->wait_idle();  // the old feature may still be in use by the GPU (rare: resizes)
         NVSDK_NGX_D3D12_ReleaseFeature(g_feature);
         g_feature = nullptr;
+        g_featureKey = {};
     }
     NVSDK_NGX_DLSS_Create_Params cp = {};
-    cp.Feature.InWidth = f.renderW;
-    cp.Feature.InHeight = f.renderH;
-    cp.Feature.InTargetWidth = f.outW;
-    cp.Feature.InTargetHeight = f.outH;
-    cp.Feature.InPerfQualityValue = QualityFor(float(f.renderW) / float(f.outW));
+    cp.Feature.InWidth = key.renderW;
+    cp.Feature.InHeight = key.renderH;
+    cp.Feature.InTargetWidth = key.outW;
+    cp.Feature.InTargetHeight = key.outH;
+    cp.Feature.InPerfQualityValue = QualityFor(float(key.renderW) / float(key.outW));
     cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
                               NVSDK_NGX_DLSS_Feature_Flags_DepthInverted | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
-                              (g_options.mvJittered ? NVSDK_NGX_DLSS_Feature_Flags_MVJittered : 0);
+                              (key.jittered ? NVSDK_NGX_DLSS_Feature_Flags_MVJittered : 0);
+    command_list* cmd = queue->get_immediate_command_list();
+    auto list = reinterpret_cast<ID3D12GraphicsCommandList*>(cmd->get_native());
     const NVSDK_NGX_Result r = NGX_D3D12_CREATE_DLSS_EXT(list, 1, 1, &g_feature, g_params, &cp);
+    queue->flush_immediate_command_list();
     if (NVSDK_NGX_FAILED(r) || !g_feature) {
         g_feature = nullptr;
-        SetStatus("DLSS feature creation failed (0x%08x) for %ux%u -> %ux%u", static_cast<unsigned>(r), f.renderW,
-                  f.renderH, f.outW, f.outH);
-        return false;
+        g_failedKey = key;
+        SetStatus("DLSS feature creation failed (0x%08x) for %ux%u -> %ux%u", static_cast<unsigned>(r), key.renderW,
+                  key.renderH, key.outW, key.outH);
+        return;
     }
-    g_featW = f.renderW;
-    g_featH = f.renderH;
-    g_featOutW = f.outW;
-    g_featOutH = f.outH;
-    g_featJittered = g_options.mvJittered;
-    LOG("dlss: feature created %ux%u -> %ux%u (quality mode %d)", f.renderW, f.renderH, f.outW, f.outH,
-        static_cast<int>(cp.Feature.InPerfQualityValue));
-    return true;
+    g_featureKey = key;
+    LOG("dlss: feature created %ux%u -> %ux%u (quality mode %d%s)", key.renderW, key.renderH, key.outW, key.outH,
+        static_cast<int>(cp.Feature.InPerfQualityValue), key.jittered ? ", jittered MVs" : "");
+    SetStatus("ready: %ux%u -> %ux%u", key.renderW, key.renderH, key.outW, key.outH);
 }
 
 }  // namespace
 
+void Tick(effect_runtime* runtime) {
+    device* dev = runtime->get_device();
+    if (dev->get_api() != device_api::d3d12) return;
+    // NGX init on the device that presents, at present time: never mid-frame.
+    if (g_init == Init::untried) {
+        g_init = InitNgx(dev) ? Init::ok : Init::failed;
+        if (g_init == Init::ok && !CreatePipeline(dev)) g_init = Init::failed;
+    }
+    if (g_init != Init::ok || dev != g_device || !g_options.enabled) return;
+    if (g_wanted.renderW && g_wanted != g_featureKey && g_wanted != g_failedKey)
+        CreateFeature(runtime->get_command_queue(), g_wanted);
+}
+
 Result Evaluate(const Frame& f) {
-    if (!g_options.enabled) return Result::skipped;
-    device* dev = f.cmd->get_device();
-    if (dev->get_api() != device_api::d3d12) return Result::skipped;
-    if (g_init == Init::untried) g_init = InitNgx(dev) ? Init::ok : Init::failed;
-    if (g_init != Init::ok || dev != g_device) return Result::skipped;
-    if (!g_pso.handle) {
-        if (g_pipelineFailed) return Result::skipped;
-        if (!CreatePipeline(dev)) {
-            g_pipelineFailed = true;
-            return Result::skipped;
-        }
+    if (!g_options.enabled || g_init != Init::ok || f.cmd->get_device() != g_device) return Result::skipped;
+    device* dev = g_device;
+
+    FeatureKey key;
+    key.renderW = f.renderW;
+    key.renderH = f.renderH;
+    key.outW = f.outW;
+    key.outH = f.outH;
+    key.jittered = g_options.mvJittered;
+    if (!g_feature || key != g_featureKey) {
+        g_wanted = key;  // created at the next present; the game's TAAU runs this frame
+        return Result::skipped;
     }
 
     // Our textures match the game's render-target size; only the render rect is used.
@@ -249,6 +286,7 @@ Result Evaluate(const Frame& f) {
         return Result::skipped;
     }
 
+    // From here on the game's command list is modified; the caller restores its state.
     // 1. Motion vectors and depth for DLSS.
     command_list* cmd = f.cmd;
     float constants[kConstants];
@@ -274,32 +312,28 @@ Result Evaluate(const Frame& f) {
 
     // 2. DLSS into the game's TAAU output.
     auto list = reinterpret_cast<ID3D12GraphicsCommandList*>(cmd->get_native());
-    Result result = Result::failed;
-    if (EnsureFeature(list, f)) {
-        NVSDK_NGX_D3D12_DLSS_Eval_Params e = {};
-        e.Feature.pInColor = reinterpret_cast<ID3D12Resource*>(f.color.handle);
-        e.Feature.pInOutput = reinterpret_cast<ID3D12Resource*>(f.output.handle);
-        e.pInDepth = reinterpret_cast<ID3D12Resource*>(g_depth.handle);
-        e.pInMotionVectors = reinterpret_cast<ID3D12Resource*>(g_motion.handle);
-        e.InJitterOffsetX = g_options.flipJitterX ? -f.jitterX : f.jitterX;
-        e.InJitterOffsetY = g_options.flipJitterY ? -f.jitterY : f.jitterY;
-        e.InRenderSubrectDimensions = {f.renderW, f.renderH};
-        e.InReset = f.reset ? 1 : 0;
-        e.InMVScaleX = 1.0f;
-        e.InMVScaleY = 1.0f;
-        e.InOutputSubrectBase = {f.outX, f.outY};
-        const NVSDK_NGX_Result r = NGX_D3D12_EVALUATE_DLSS_EXT(list, g_feature, g_params, &e);
-        if (NVSDK_NGX_FAILED(r)) {
-            ++g_failures;
-            SetStatus("DLSS evaluate failed (0x%08x)", static_cast<unsigned>(r));
-        } else {
-            ++g_done;
-            SetStatus("running: %ux%u -> %ux%u", f.renderW, f.renderH, f.outW, f.outH);
-            result = Result::done;
-        }
-    }
+    NVSDK_NGX_D3D12_DLSS_Eval_Params e = {};
+    e.Feature.pInColor = reinterpret_cast<ID3D12Resource*>(f.color.handle);
+    e.Feature.pInOutput = reinterpret_cast<ID3D12Resource*>(f.output.handle);
+    e.pInDepth = reinterpret_cast<ID3D12Resource*>(g_depth.handle);
+    e.pInMotionVectors = reinterpret_cast<ID3D12Resource*>(g_motion.handle);
+    e.InJitterOffsetX = g_options.flipJitterX ? -f.jitterX : f.jitterX;
+    e.InJitterOffsetY = g_options.flipJitterY ? -f.jitterY : f.jitterY;
+    e.InRenderSubrectDimensions = {f.renderW, f.renderH};
+    e.InReset = f.reset ? 1 : 0;
+    e.InMVScaleX = 1.0f;
+    e.InMVScaleY = 1.0f;
+    e.InOutputSubrectBase = {f.outX, f.outY};
+    const NVSDK_NGX_Result r = NGX_D3D12_EVALUATE_DLSS_EXT(list, g_feature, g_params, &e);
     cmd->barrier(2, ours, srv, uav);
-    return result;
+    if (NVSDK_NGX_FAILED(r)) {
+        ++g_failures;
+        SetStatus("DLSS evaluate failed (0x%08x)", static_cast<unsigned>(r));
+        return Result::failed;
+    }
+    ++g_done;
+    SetStatus("running: %ux%u -> %ux%u", f.renderW, f.renderH, f.outW, f.outH);
+    return Result::done;
 }
 
 void OnDestroyResource(resource r) {
@@ -313,6 +347,7 @@ void Shutdown(device* dev) {
     if (dev != g_device || !g_device) return;
     if (g_feature) NVSDK_NGX_D3D12_ReleaseFeature(g_feature);
     g_feature = nullptr;
+    g_featureKey = g_wanted = g_failedKey = {};
     if (g_params) NVSDK_NGX_D3D12_DestroyParameters(g_params);
     g_params = nullptr;
     for (auto& [res, view] : g_srvs) dev->destroy_resource_view(view);
