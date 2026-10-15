@@ -1,4 +1,6 @@
-# Builds bin\QuarryDLSS.addon64 with LLVM-MinGW (winget: MartinStorsjo.LLVM-MinGW.UCRT).
+# Builds bin\QuarryDLSS.addon64 with MSVC (Visual Studio 2022+ with C++ tools).
+# MSVC is required: ReShade is built with it, and MinGW returns API structs
+# (resource, resource_desc, ...) differently, which crashes inside ReShade.
 # Usage: .\build.ps1 [-Install]   (-Install copies it next to TheQuarry-Win64-Shipping.exe)
 param(
     [switch]$Install,
@@ -7,28 +9,30 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 
-$cxx = (Get-Command clang++ -ErrorAction SilentlyContinue).Source
-if (-not $cxx) {
-    $cxx = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\MartinStorsjo.LLVM-MinGW*\*\bin\clang++.exe" -ErrorAction SilentlyContinue |
-        Select-Object -First 1 -ExpandProperty FullName
-}
-if (-not $cxx) { throw "clang++ not found. Install with: winget install MartinStorsjo.LLVM-MinGW.UCRT" }
+$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+$vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+if (-not $vs) { throw "Visual Studio with the C++ x64 tools not found." }
+$vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvars64.bat"
 
-New-Item -ItemType Directory -Force "$root\bin\obj" | Out-Null
-$windres = Join-Path (Split-Path $cxx) "llvm-windres.exe"
-& $windres --target=pe-x86-64 -I "$root\src" -i "$root\src\version.rc" -O coff -o "$root\bin\obj\version.o"
-if ($LASTEXITCODE) { throw "resource compile failed" }
+$obj = "$root\bin\obj"
+New-Item -ItemType Directory -Force $obj | Out-Null
 
 # ReShade add-on headers in third_party/ match ReShade 6.8.0.
-& $cxx --target=x86_64-w64-mingw32 -std=c++17 -O2 -shared -static -s `
-    -Wall -Wno-unused-function -Wno-missing-braces -Wno-unknown-attributes `
-    -I "$root\third_party\imgui" -I "$root\third_party\reshade\include" `
-    -o "$root\bin\QuarryDLSS.addon64" "$root\src\probe.cpp" "$root\bin\obj\version.o"
+$cmd = @(
+    "call `"$vcvars`" >nul",
+    "rc /nologo /i `"$root\src`" /fo `"$obj\version.res`" `"$root\src\version.rc`"",
+    ("cl /nologo /std:c++17 /O2 /EHsc /MT /W3 /D_CRT_SECURE_NO_WARNINGS /DNOMINMAX " +
+     "/I `"$root\third_party\imgui`" /I `"$root\third_party\reshade\include`" " +
+     "/Fo`"$obj\\`" `"$root\src\probe.cpp`" `"$obj\version.res`" " +
+     "/link /DLL /OUT:`"$root\bin\QuarryDLSS.addon64`" /PDB:`"$obj\QuarryDLSS.pdb`" /DEBUG")
+) -join " && "
+cmd /c $cmd
 if ($LASTEXITCODE) { throw "add-on build failed" }
 Write-Host "Built $root\bin\QuarryDLSS.addon64"
 
 if ($Install) {
     if (-not (Test-Path "$GameBin\TheQuarry-Win64-Shipping.exe")) { throw "Game not found in $GameBin" }
+    if (Get-Process TheQuarry-Win64-Shipping -ErrorAction SilentlyContinue) { throw "Close the game first." }
     Copy-Item "$root\bin\QuarryDLSS.addon64" $GameBin -Force
     Write-Host "Installed to $GameBin"
 }

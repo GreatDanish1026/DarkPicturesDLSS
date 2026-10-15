@@ -21,8 +21,8 @@ in the game. It only reports:
 .\build.ps1 -Install   # also copies it to the game's SMG026\Binaries\Win64
 ```
 
-Needs LLVM-MinGW (`winget install MartinStorsjo.LLVM-MinGW.UCRT`), the same toolchain
-as AWTweaks.
+Needs Visual Studio 2022 or newer with the C++ x64 tools. MinGW builds crash inside
+ReShade: it returns API structs with a different calling convention than MSVC.
 
 ## Test run
 
