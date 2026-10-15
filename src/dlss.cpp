@@ -154,8 +154,10 @@ bool CreateStats(device* dev) {
                                 resource_usage::unordered_access | resource_usage::copy_source | resource_usage::copy_dest);
         const resource_desc cpu(sizeof(zeros), memory_heap::readback, resource_usage::copy_dest);
         if (!dev->create_resource(gpu, nullptr, resource_usage::unordered_access, &g_stats[i]) ||
+            // Typed buffer views: ReShade passes offset/size through as FirstElement/NumElements
+            // (elements, not bytes). A byte count here made an out-of-bounds UAV: device removed.
             !dev->create_resource_view(g_stats[i], resource_usage::unordered_access,
-                                       resource_view_desc(format::r32_uint, 0, sizeof(zeros)), &g_statsUav[i]) ||
+                                       resource_view_desc(format::r32_uint, 0, kStatsWords), &g_statsUav[i]) ||
             !dev->create_resource(cpu, nullptr, resource_usage::copy_dest, &g_statsReadback[i]))
             return false;
     }
