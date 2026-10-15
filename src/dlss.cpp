@@ -18,7 +18,9 @@
 #include <nvsdk_ngx_helpers_d3d.h>
 
 #include <cstdio>
+#include <algorithm>
 #include <unordered_map>
+#include <vector>
 
 #include "dlss_prepare_cs.h"  // kDlssPrepareCS, compiled by build.ps1 from shaders/dlss_prepare.hlsl
 
@@ -49,9 +51,14 @@ device* g_device = nullptr;
 ID3D12Device* g_d3d = nullptr;
 NVSDK_NGX_Parameter* g_params = nullptr;
 
-// The DLSS feature is only ever created at present time, on ReShade's immediate
-// command list (Tick). A TAAU dispatch whose sizes don't match it records nothing:
-// it just asks for that feature (g_wanted) and the game's TAAU runs that frame.
+// DLSS features are only ever created at present time, on ReShade's immediate
+// command list (Tick). A TAAU dispatch with no feature for its sizes records nothing:
+// it asks for one (g_wanted) and the game's TAAU runs that frame.
+//
+// The game switches between letterboxed (2576x1072 -> 3840x1600) and full-frame
+// (2576x1448 -> 3840x2160) shots, with different output textures. One feature can't
+// serve both (DLSS output size is fixed at creation; output subrects only offset it),
+// so features are cached per size and kept, and a shot change just switches feature.
 struct FeatureKey {
     uint32_t renderW = 0, renderH = 0, outW = 0, outH = 0;
     bool jittered = false;
@@ -61,10 +68,22 @@ struct FeatureKey {
     }
     bool operator!=(const FeatureKey& o) const { return !(*this == o); }
 };
-NVSDK_NGX_Handle* g_feature = nullptr;
-FeatureKey g_featureKey;  // what g_feature was created for
-FeatureKey g_wanted;      // what the last TAAU dispatch needed
-FeatureKey g_failedKey;   // last creation that failed (not retried)
+struct Feature {
+    FeatureKey key;
+    NVSDK_NGX_Handle* handle = nullptr;
+    uint64_t lastUsed = 0;  // evaluate count when last used
+};
+constexpr size_t kMaxFeatures = 4;
+std::vector<Feature> g_features;
+const Feature* g_lastFeature = nullptr;  // used by the previous evaluate (history continuity)
+FeatureKey g_wanted;                      // what the last TAAU dispatch needed
+FeatureKey g_failedKey;                   // last creation that failed (not retried)
+
+Feature* FindFeature(const FeatureKey& key) {
+    for (auto& f : g_features)
+        if (f.key == key) return &f;
+    return nullptr;
+}
 
 pipeline_layout g_layout = {};
 pipeline g_pso = {};
@@ -292,12 +311,17 @@ NVSDK_NGX_PerfQuality_Value QualityFor(float fraction) {
 // Present time only, on ReShade's immediate command list for the game's queue, so a
 // failure never leaves anything in the game's own command lists.
 void CreateFeature(command_queue* queue, const FeatureKey& key) {
-    if (g_feature) {
-        queue->wait_idle();  // the old feature may still be in use by the GPU (rare: resizes)
-        NVSDK_NGX_D3D12_ReleaseFeature(g_feature);
-        g_feature = nullptr;
-        g_featureKey = {};
+    if (g_features.size() >= kMaxFeatures) {
+        // Evict the least recently used. It may still be in use by the GPU: wait (rare).
+        auto lru = std::min_element(g_features.begin(), g_features.end(),
+                                    [](const Feature& a, const Feature& b) { return a.lastUsed < b.lastUsed; });
+        queue->wait_idle();
+        NVSDK_NGX_D3D12_ReleaseFeature(lru->handle);
+        LOG("dlss: released feature %ux%u -> %ux%u", lru->key.renderW, lru->key.renderH, lru->key.outW, lru->key.outH);
+        g_features.erase(lru);
+        g_lastFeature = nullptr;  // pointers into g_features moved
     }
+    NVSDK_NGX_Handle* handle = nullptr;
     NVSDK_NGX_DLSS_Create_Params cp = {};
     cp.Feature.InWidth = key.renderW;
     cp.Feature.InHeight = key.renderH;
@@ -309,18 +333,19 @@ void CreateFeature(command_queue* queue, const FeatureKey& key) {
                               (key.jittered ? NVSDK_NGX_DLSS_Feature_Flags_MVJittered : 0);
     command_list* cmd = queue->get_immediate_command_list();
     auto list = reinterpret_cast<ID3D12GraphicsCommandList*>(cmd->get_native());
-    const NVSDK_NGX_Result r = NGX_D3D12_CREATE_DLSS_EXT(list, 1, 1, &g_feature, g_params, &cp);
+    const NVSDK_NGX_Result r = NGX_D3D12_CREATE_DLSS_EXT(list, 1, 1, &handle, g_params, &cp);
     queue->flush_immediate_command_list();
-    if (NVSDK_NGX_FAILED(r) || !g_feature) {
-        g_feature = nullptr;
+    if (NVSDK_NGX_FAILED(r) || !handle) {
         g_failedKey = key;
         SetStatus("DLSS feature creation failed (0x%08x) for %ux%u -> %ux%u", static_cast<unsigned>(r), key.renderW,
                   key.renderH, key.outW, key.outH);
         return;
     }
-    g_featureKey = key;
-    LOG("dlss: feature created %ux%u -> %ux%u (quality mode %d%s)", key.renderW, key.renderH, key.outW, key.outH,
-        static_cast<int>(cp.Feature.InPerfQualityValue), key.jittered ? ", jittered MVs" : "");
+    g_lastFeature = nullptr;  // push_back may move the others
+    g_features.push_back({key, handle, g_done});
+    LOG("dlss: feature created %ux%u -> %ux%u (quality mode %d%s), %zu cached", key.renderW, key.renderH, key.outW,
+        key.outH, static_cast<int>(cp.Feature.InPerfQualityValue), key.jittered ? ", jittered MVs" : "",
+        g_features.size());
     SetStatus("ready: %ux%u -> %ux%u", key.renderW, key.renderH, key.outW, key.outH);
 }
 
@@ -335,7 +360,7 @@ void Tick(effect_runtime* runtime) {
         if (g_init == Init::ok && !CreatePipeline(dev)) g_init = Init::failed;
     }
     if (g_init != Init::ok || dev != g_device || !g_options.enabled) return;
-    if (g_wanted.renderW && g_wanted != g_featureKey && g_wanted != g_failedKey)
+    if (g_wanted.renderW && !FindFeature(g_wanted) && g_wanted != g_failedKey)
         CreateFeature(runtime->get_command_queue(), g_wanted);
 }
 
@@ -349,10 +374,13 @@ Result Evaluate(const Frame& f) {
     key.outW = f.outW;
     key.outH = f.outH;
     key.jittered = g_options.mvJittered;
-    if (!g_feature || key != g_featureKey) {
+    Feature* feature = FindFeature(key);
+    if (!feature) {
         g_wanted = key;  // created at the next present; the game's TAAU runs this frame
         return Result::skipped;
     }
+    // A feature last used shots ago holds stale history: start it fresh.
+    const bool switched = feature != g_lastFeature;
 
     // Our textures match the game's render-target size; only the render rect is used.
     const resource_desc velocityDesc = dev->get_resource_desc(f.velocity);
@@ -410,11 +438,11 @@ Result Evaluate(const Frame& f) {
     e.InJitterOffsetX = g_options.flipJitterX ? -f.jitterX : f.jitterX;
     e.InJitterOffsetY = g_options.flipJitterY ? -f.jitterY : f.jitterY;
     e.InRenderSubrectDimensions = {f.renderW, f.renderH};
-    e.InReset = f.reset ? 1 : 0;
+    e.InReset = (f.reset || switched) ? 1 : 0;
     e.InMVScaleX = g_options.invertMotion ? -1.0f : 1.0f;
     e.InMVScaleY = g_options.invertMotion ? -1.0f : 1.0f;
     e.InOutputSubrectBase = {f.outX, f.outY};
-    const NVSDK_NGX_Result r = NGX_D3D12_EVALUATE_DLSS_EXT(list, g_feature, g_params, &e);
+    const NVSDK_NGX_Result r = NGX_D3D12_EVALUATE_DLSS_EXT(list, feature->handle, g_params, &e);
     cmd->barrier(2, ours, srv, uav);
     if (NVSDK_NGX_FAILED(r)) {
         ++g_failures;
@@ -422,6 +450,8 @@ Result Evaluate(const Frame& f) {
         return Result::failed;
     }
     ++g_done;
+    feature->lastUsed = g_done;
+    g_lastFeature = feature;
     SetStatus("running: %ux%u -> %ux%u", f.renderW, f.renderH, f.outW, f.outH);
     return Result::done;
 }
@@ -435,9 +465,10 @@ void OnDestroyResource(resource r) {
 
 void Shutdown(device* dev) {
     if (dev != g_device || !g_device) return;
-    if (g_feature) NVSDK_NGX_D3D12_ReleaseFeature(g_feature);
-    g_feature = nullptr;
-    g_featureKey = g_wanted = g_failedKey = {};
+    for (auto& feat : g_features) NVSDK_NGX_D3D12_ReleaseFeature(feat.handle);
+    g_features.clear();
+    g_lastFeature = nullptr;
+    g_wanted = g_failedKey = {};
     if (g_params) NVSDK_NGX_D3D12_DestroyParameters(g_params);
     g_params = nullptr;
     for (auto& [res, view] : g_srvs) dev->destroy_resource_view(view);

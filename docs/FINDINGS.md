@@ -202,6 +202,10 @@ sizes):
   for it in the same cutscene.
 - Feature thrash is still there: letterboxed <-> full-frame changes recreate the
   feature 6 times in this run.
+- **0.5.5 caches features per size** (up to 4, LRU) instead of recreating them. One
+  feature can't cover both shapes: DLSS output size is fixed at creation, output subrects
+  only offset it, and the letterboxed TAAU output texture is itself 3840x1600. Switching
+  to a feature that wasn't used last frame sets InReset.
 
 ### Crash report from a probe 0.3.1 session
 
