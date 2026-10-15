@@ -40,7 +40,7 @@ ReShade: it returns API structs with a different calling convention than MSVC.
    out of `SMG026\Content\Paks\~mods` while testing. They likely change TAA settings.
 4. Start the game and load into gameplay. Press **Home**, then open the
    **Add-ons → QuarryDLSS probe** section to see the API and the main TAA guess.
-5. Press **Ctrl+F11** (or the overlay button) once in a busy scene to dump a frame.
+5. Press **Ctrl+F9** (or the overlay button) once in a busy scene to dump a frame.
    Then, while the camera moves, press **Ctrl+F10** to dump 8 frames of TAA constants.
 6. Optional: try a second run with `-dx12` in the Steam launch options, to see whether
    the Direct3D 12 renderer starts.

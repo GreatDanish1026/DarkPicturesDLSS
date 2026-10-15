@@ -16,7 +16,7 @@
 //
 // Output, next to the game executable:
 //   QuarryDLSS.log                 API, swap chain, every temporal pass found
-//   QuarryDLSS_frame_<n>.txt       full pass list of one frame (Ctrl+F11 or the overlay)
+//   QuarryDLSS_frame_<n>.txt       full pass list of one frame (Ctrl+F9 or the overlay)
 //   QuarryDLSS_cbuffers_<n>.txt    constants of the large temporal passes, 8 frames (Ctrl+F10)
 //
 // Direct3D 12 (-dx12) is covered by mirroring the descriptor heaps and root
@@ -1118,7 +1118,7 @@ void RequestCbDump() {
 void OnReshadePresent(effect_runtime* rt) {
     std::lock_guard lock(g_mutex);
     UpdateSwapchainInfo(rt);
-    if (rt->is_key_down(VK_CONTROL) && rt->is_key_pressed(VK_F11)) RequestDump();
+    if (rt->is_key_down(VK_CONTROL) && rt->is_key_pressed(VK_F9)) RequestDump();  // not F11: UE toggles fullscreen on it
     if (rt->is_key_down(VK_CONTROL) && rt->is_key_pressed(VK_F10)) RequestCbDump();
 }
 
@@ -1151,7 +1151,7 @@ void DrawOverlay(effect_runtime*) {
                     static_cast<unsigned long long>(c->hits));
     }
     ImGui::Separator();
-    if (ImGui::Button(g_dumpFrame ? "Capturing..." : "Dump next frame (Ctrl+F11)")) RequestDump();
+    if (ImGui::Button(g_dumpFrame ? "Capturing..." : "Dump next frame (Ctrl+F9)")) RequestDump();
     if (!g_lastDumpFile.empty()) ImGui::Text("Last dump: %s", g_lastDumpFile.c_str());
     if (ImGui::Button(g_cbDumpFirst ? "Capturing constants..." : "Dump TAA constants, 8 frames (Ctrl+F10)"))
         RequestCbDump();

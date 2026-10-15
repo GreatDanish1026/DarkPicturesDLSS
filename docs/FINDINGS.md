@@ -82,10 +82,19 @@ input with 0.7405 max V). The game sets the screen percentage itself. Its own se
 `bUseDynamicResolution`, `VRSQuality` and `RTReflectionsQuality` / `bRTAmbientOcclusionEnabled`,
 so the D3D12 build also has ray-traced options.
 
-Next try: the same cvars under `[ConsoleVariables]`, which is applied at a higher
-priority. If the game still overrides them, the mod has to set the screen percentage
-in-engine every frame (as Days Gone writes the cvar data directly), which it needs to
-do anyway.
+A second run with the same cvars also under `[ConsoleVariables]` (higher priority)
+**also had no effect**. At 4K the main TAA still dispatched 480x200 for a 3840x1600 view
+rect, and at the 1280x720 window size 160x67 for 1280x536. The ini approach is dead and
+the test Engine.ini was removed. **The mod has to set the screen percentage in-engine**,
+as Days Gone writes the cvar data directly each frame, or by hooking whatever the game
+uses to set it.
+
+### Ctrl+F11 toggled the game to windowed mode
+
+UE toggles fullscreen on F11, so every Ctrl+F11 frame dump also switched the game to its
+1280x720 window size (`ResolutionSizeX/Y` in GameUserSettings.ini) and back. That's why
+dumps coincide with swap chain resizes, some dumps are at 1280x720, and some contain two
+frames' worth of passes. Probe 0.3.1 dumps on **Ctrl+F9**.
 
 ## Main TAA pass (Direct3D 11)
 
