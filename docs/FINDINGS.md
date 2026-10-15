@@ -255,6 +255,15 @@ sizes):
 - **0.5.9:** cuts stay pending until DLSS actually evaluates; any frame DLSS missed
   (fallback, unknown permutation, feature not ready) resets it on the next evaluate
   (frame-gap check); fallback reasons are logged on every change of reason.
+- **0.5.9 run (18:55):** resets now reach DLSS. Every cut frame falls back (an input
+  smaller than the render rect, most likely UE's 1x1 velocity placeholder on cut frames)
+  and the next frame evaluates with reset+0. **But the kick close-up still corrupts**
+  (18:55:42.745, 0.83 s after a reset that reached DLSS, motion about 0.5 px, max 1.2 px).
+  So lost resets were a real bug but not the whole cause. Something produces echoes
+  within a shot with almost no motion. Next: a frame dump during that shot, to look for
+  passes that read back the TAAU output (it doubles as the game's TAA history).
+- 0.5.10: fallback reasons are specific (which input is too small, etc.) and no longer
+  include per-frame values, so they're logged once per change.
 
 ### Crash report from a probe 0.3.1 session
 

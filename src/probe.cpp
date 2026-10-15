@@ -1160,16 +1160,24 @@ bool BuildDlssFrame(command_list* cmd, const ContextState& st, dlss::Frame& f, s
     const auto outDesc = dev->get_resource_desc(f.output);
     const uint32_t minW = std::min({colorDesc.texture.width, depthDesc.texture.width, velocityDesc.texture.width});
     const uint32_t minH = std::min({colorDesc.texture.height, depthDesc.texture.height, velocityDesc.texture.height});
-    if (f.renderW == 0 || f.renderH == 0 || f.renderW > minW || f.renderH > minH ||
-        f.outW == 0 || f.outH == 0 || f.outX + f.outW > outDesc.texture.width || f.outY + f.outH > outDesc.texture.height ||
-        std::abs(f.jitterX) > 0.5f || std::abs(f.jitterY) > 0.5f) {
-        char buf[160];
-        snprintf(buf, sizeof(buf), "implausible TAAU constants (render %ux%u, output %u,%u %ux%u, jitter %g,%g)",
-                 f.renderW, f.renderH, f.outX, f.outY, f.outW, f.outH, f.jitterX, f.jitterY);
-        why = buf;
-        return false;
+    // Specific reasons, without per-frame values like jitter, so the log only records changes.
+    char buf[200];
+    if (f.renderW == 0 || f.renderH == 0 || f.outW == 0 || f.outH == 0) {
+        snprintf(buf, sizeof(buf), "empty rect (render %ux%u, output %ux%u)", f.renderW, f.renderH, f.outW, f.outH);
+    } else if (f.renderW > minW || f.renderH > minH) {
+        snprintf(buf, sizeof(buf), "an input is smaller than the %ux%u render rect (colour %ux%u, depth %ux%u, velocity %ux%u)",
+                 f.renderW, f.renderH, colorDesc.texture.width, colorDesc.texture.height, depthDesc.texture.width,
+                 depthDesc.texture.height, velocityDesc.texture.width, velocityDesc.texture.height);
+    } else if (f.outX + f.outW > outDesc.texture.width || f.outY + f.outH > outDesc.texture.height) {
+        snprintf(buf, sizeof(buf), "output rect %u,%u %ux%u outside the %ux%u output texture", f.outX, f.outY, f.outW,
+                 f.outH, outDesc.texture.width, outDesc.texture.height);
+    } else if (std::abs(f.jitterX) > 0.5f || std::abs(f.jitterY) > 0.5f) {
+        snprintf(buf, sizeof(buf), "jitter out of range");
+    } else {
+        return true;
     }
-    return true;
+    why = buf;
+    return false;
 }
 
 // NGX bound its own heaps, root signature and pipeline behind ReShade's back. Our
