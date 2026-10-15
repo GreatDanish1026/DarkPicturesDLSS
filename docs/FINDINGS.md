@@ -72,6 +72,21 @@ with the DLSS jitter debug overlay. Depth is reversed-Z (`DepthInverted`), with 
 moving objects, plus camera motion reconstructed from depth and the previous-frame
 matrices in `cb1`.
 
+### Render scale can't be set from Engine.ini [SystemSettings]
+
+Run of 2026-10-15 (`-dx12`) with `r.ScreenPercentage=67` and `r.TemporalAA.Upsampling=1`
+under `[SystemSettings]` in the user `Engine.ini`. **No effect:** the view rect stayed at
+3840x1600 (main TAA still dispatched 480x200 groups, and `cb0` still had a 3840x2160
+input with 0.7405 max V). The game sets the screen percentage itself. Its own settings
+(`[/Script/SMGRuntime.GamePCSettings]` in GameUserSettings.ini) include
+`bUseDynamicResolution`, `VRSQuality` and `RTReflectionsQuality` / `bRTAmbientOcclusionEnabled`,
+so the D3D12 build also has ray-traced options.
+
+Next try: the same cvars under `[ConsoleVariables]`, which is applied at a higher
+priority. If the game still overrides them, the mod has to set the screen percentage
+in-engine every frame (as Days Gone writes the cvar data directly), which it needs to
+do anyway.
+
 ## Main TAA pass (Direct3D 11)
 
 UE 4.26's standard compute TAA (`TemporalAA.usf`, `FTemporalAACS`), dispatched as
