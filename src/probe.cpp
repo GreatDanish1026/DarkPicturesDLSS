@@ -77,8 +77,13 @@ void OpenLog() {
     g_dir.resize(g_dir.find_last_of(L"\\/") + 1);
     std::wstring log = g_dir + L"QuarryDLSS.log";
     std::wstring prev = g_dir + L"QuarryDLSS.prev.log";
-    MoveFileExW(log.c_str(), prev.c_str(), MOVEFILE_REPLACE_EXISTING);
-    g_log = _wfopen(log.c_str(), L"w");
+    // ReShade loads and unloads the add-on for each device the game creates at
+    // startup, so only the first load in a process starts a new log.
+    if (GetEnvironmentVariableW(L"QDLSS_LOG_OPEN", nullptr, 0) == 0) {
+        SetEnvironmentVariableW(L"QDLSS_LOG_OPEN", L"1");
+        MoveFileExW(log.c_str(), prev.c_str(), MOVEFILE_REPLACE_EXISTING);
+    }
+    g_log = _wfopen(log.c_str(), L"a");
 }
 
 std::string Narrow(const wchar_t* s) {
@@ -474,16 +479,22 @@ void OnInitDevice(device* dev) {
     }
 }
 
+// The back buffer is read on the next ReShade frame, not here: during the game's
+// CreateSwapChainForHwnd, ReShade's get_back_buffer crashes (null write in dxgi.dll).
 void OnInitSwapchain(swapchain* sc, bool resize) {
     std::lock_guard lock(g_mutex);
-    device* dev = sc->get_device();
-    resource bb = sc->get_back_buffer(0);
-    auto d = dev->get_resource_desc(bb);
+    Log("swap chain %s (%s)", resize ? "resized" : "created", ApiName(sc->get_device()->get_api()));
+}
+
+void UpdateSwapchainInfo(effect_runtime* rt) {
+    auto d = rt->get_device()->get_resource_desc(rt->get_current_back_buffer());
     char buf[160];
     snprintf(buf, sizeof(buf), "%ux%u %s, %u buffers", d.texture.width, d.texture.height, FormatName(d.texture.format),
-             sc->get_back_buffer_count());
-    g_swapchain = buf;
-    Log("swap chain %s: %s (%s)", resize ? "resized" : "created", g_swapchain.c_str(), ApiName(dev->get_api()));
+             rt->get_back_buffer_count());
+    if (g_swapchain != buf) {
+        g_swapchain = buf;
+        Log("back buffer: %s", g_swapchain.c_str());
+    }
 }
 
 void OnInitPipeline(device*, pipeline_layout, uint32_t count, const pipeline_subobject* subs, pipeline p) {
@@ -625,10 +636,9 @@ void RequestDump() {
 }
 
 void OnReshadePresent(effect_runtime* rt) {
-    if (rt->is_key_down(VK_CONTROL) && rt->is_key_pressed(VK_F11)) {
-        std::lock_guard lock(g_mutex);
-        RequestDump();
-    }
+    std::lock_guard lock(g_mutex);
+    UpdateSwapchainInfo(rt);
+    if (rt->is_key_down(VK_CONTROL) && rt->is_key_pressed(VK_F11)) RequestDump();
 }
 
 void DrawOverlay(effect_runtime*) {
