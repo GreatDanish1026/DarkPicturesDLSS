@@ -105,7 +105,48 @@ From the exe's own code (cvar registration and lookup sites next to
 
 Probe 0.4 writes r.ScreenPercentage (default 67) and r.TemporalAA.Upsampling = 1 into both
 copies every frame, logs any time the game changes them back, and has an overlay checkbox
-and slider. Result pending.
+and slider.
+
+### TAAU path at 67% (probe 0.4, `-dx12`, `QuarryDLSS_frame_1354.txt`)
+
+**Forcing the cvar data works.** The game's own values were r.ScreenPercentage 100 and
+r.TemporalAA.Upsampling **1** (TAAU was already on, so it just runs at 100%). The game
+writes 100 back on swap-chain resizes and loading. The probe re-forces it the next frame,
+so the mod has to keep doing that too.
+
+| Pass | Runs at |
+|---|---|
+| Base pass, lighting, `cd75f114186bff1a`, `b569efd647217872` (322x134 groups), translucency composite `04346c4e90a9704d` | **2576x1072** render rect in 2576x1448 textures |
+| **Main TAA, now the upscaler: `6435b4eb8190e22b`** (480x200 groups) | 2576x1072 in -> **3840x1600** out |
+| Downsample `ba3e1c97e7c22acb`, histogram, eye adaptation, bloom, tonemapper `4b7e40416e1f163b`, final passes | 3840x1600 |
+
+The 67% render rect is rounded to 2576x1448 textures. Render targets are 8-aligned, so
+the pass still sees 2576x1072 valid pixels.
+
+**DLSS replaces exactly `6435b4eb8190e22b`** (and the other TAAU permutations at other
+sizes):
+
+| Slot | Texture | DLSS input |
+|---|---|---|
+| t0 | 1x1 RGBA32F | exposure (`pInExposureTexture`, or use auto-exposure) |
+| t1 | 2576x1448 RGBA16F, output of `04346c4e90a9704d` | **colour** (render res, subrect 2576x1072) |
+| t2 | 2576x1448 R32F view of R32G8X24 | **depth** (reversed-Z) |
+| t3 | 2576x1448 RGBA16_UNORM, written by geometry | **velocity**: real in gameplay, encoded UE4 velocity (needs decoding plus camera motion for static pixels) |
+| t4 | 2576x1448 stencil view | (responsive AA, not needed by DLSS) |
+| t5 | 3840x1600 RGBA16F | game history (DLSS keeps its own) |
+| u0 | **3840x1600 RGBA16F** | **DLSS output** |
+
+Still to capture: the TAAU permutation's `cb0`. No constants dump was written this
+session, though Ctrl+F10 worked before. The jitter should now be in render-resolution
+pixels. The TAAU shader key at other output sizes is still unknown.
+
+### Crash report from a probe 0.3.1 session
+
+A `-dx12` session at 14:57-14:58 (probe 0.3.1) crashed about 9 s after a frame dump:
+`EXCEPTION_ACCESS_VIOLATION writing 0x5cc3` at **exe+0x4055e62**, with only game frames
+on the stack. The add-on was loaded but not on the stack. The install has about 20 crash
+reports from before this project too, so it's probably the game or the pak mods, but
+this needs watching.
 
 ### Ctrl+F11 toggled the game to windowed mode
 
