@@ -158,6 +158,23 @@ sizes):
   mod can use the engine's own sequence as is, read from `cb0` row 28 each frame.
 - Not seen yet: the TAAU permutation at other output sizes (the 1280x720 window).
 
+### First DLSS runs (0.5.0 / 0.5.1, `-dx12`)
+
+- **0.5.0 crashed at launch.** DLSS feature creation failed mid-frame on the game's
+  command list (`0xbad00002`, platform error) while the TAAU inputs were still 1x1
+  loading placeholders. The game then crashed in its D3D12 RHI on the same thread
+  (exe+0x297c976, reading offset 0x18 of a null compute shader pointer).
+- **0.5.1 runs DLSS.** NGX loads the driver's `_nvngx.dll` from the DriverStore, and the
+  app's `nvngx_dlss.dll` 310.9.1 is overridden by the **NVIDIA App's DLSS override**
+  (snippet 310.9.16, model preset 11). Features were created for 2576x1072 -> 3840x1600
+  (letterboxed gameplay) and 2576x1448 -> 3840x2160 (full-frame scenes). Evaluates ran
+  with no failures and no crash. Loading frames use the game's TAAU, because velocity
+  is a 1x1 placeholder.
+- **Feature thrash:** switching between letterboxed and full-frame shots recreates the
+  feature (wait_idle plus creation, about 30-100 ms). Fix: create one feature for the
+  full 3840x2160 output with output subrects enabled, and pass the letterbox as the
+  output subrect.
+
 ### Crash report from a probe 0.3.1 session
 
 A `-dx12` session at 14:57-14:58 (probe 0.3.1) crashed about 9 s after a frame dump:
