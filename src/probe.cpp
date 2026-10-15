@@ -1443,15 +1443,17 @@ void DrawOverlay(effect_runtime*) {
     ImGui::SameLine();
     ImGui::Checkbox("Motion vectors include jitter", &dlss::g_options.mvJittered);
     ImGui::Checkbox("Invert motion vectors (test)", &dlss::g_options.invertMotion);
+    ImGui::Checkbox("Ignore game velocity, camera motion only (test)", &dlss::g_options.ignoreVelocity);
 
     // Record option changes, so a test run can be read back from the log.
     static dlss::Options logged = dlss::g_options;
     const dlss::Options& o = dlss::g_options;
     if (o.enabled != logged.enabled || o.flipJitterX != logged.flipJitterX || o.flipJitterY != logged.flipJitterY ||
-        o.mvJittered != logged.mvJittered || o.invertMotion != logged.invertMotion) {
-        Log("options at frame %llu: DLSS %s, flip jitter X %d Y %d, MVs jittered %d, invert MVs %d",
+        o.mvJittered != logged.mvJittered || o.invertMotion != logged.invertMotion ||
+        o.ignoreVelocity != logged.ignoreVelocity) {
+        Log("options at frame %llu: DLSS %s, flip jitter X %d Y %d, MVs jittered %d, invert MVs %d, ignore velocity %d",
             static_cast<unsigned long long>(g_frame), o.enabled ? "on" : "off", o.flipJitterX, o.flipJitterY,
-            o.mvJittered, o.invertMotion);
+            o.mvJittered, o.invertMotion, o.ignoreVelocity);
         logged = o;
     }
     if (g_api == device_api::d3d12)

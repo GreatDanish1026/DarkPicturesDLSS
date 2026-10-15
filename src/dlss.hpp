@@ -34,6 +34,7 @@ struct Options {
     bool flipJitterY = false;
     bool mvJittered = false;  // DLSS feature flag; changing it recreates the feature
     bool invertMotion = false;  // DLSS MV scale -1: tests the motion vector sign
+    bool ignoreVelocity = false;  // camera reprojection only: tests the game velocity decode
 };
 extern Options g_options;
 

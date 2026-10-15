@@ -207,6 +207,20 @@ sizes):
   only offset it, and the letterboxed TAAU output texture is itself 3840x1600. Switching
   to a feature that wasn't used last frame sets InReset.
 
+### "And scene." corruption is DLSS-specific (0.5.5, 18:36-18:41)
+
+- The prologue shot "And scene." (doorway in the middle, dark walls either side)
+  corrupts reproducibly with DLSS on (screenshots 15:40:58 and 18:36:14). The walls fill
+  with bright, stair-stepped copies of the doorway.
+- A/B at the same shot: **DLSS off + 67% forced: clean** (18:40:22, 18:40:25). **Both
+  off (100%): clean** (18:41:15). So it's not the forced render scale.
+- Stats for the shot: mean motion about 1 px, but max 25-64 px (the echo step size), and
+  45% of pixels carry game velocity, far more than the two characters.
+- Hypothesis: the game's velocity isn't encoded as I decode it (e.g. UE's optional
+  sqrt "gamma" encoding), inflating tiny motions. 0.5.6 logs decoded vs camera-only
+  motion for object-velocity pixels and adds "Ignore game velocity, camera motion only
+  (test)".
+
 ### Crash report from a probe 0.3.1 session
 
 A `-dx12` session at 14:57-14:58 (probe 0.3.1) crashed about 9 s after a frame dump:

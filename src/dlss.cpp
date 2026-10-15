@@ -43,7 +43,7 @@ namespace {
 
 // NGX project id for this mod (any fixed GUID; identifies the app to NGX).
 constexpr char kProjectId[] = "6c2f3b1e-9d4a-4e57-8b6f-2a1d7c9e0f53";
-constexpr uint32_t kConstants = 20;  // float4x4 + float2 + float2
+constexpr uint32_t kConstants = 24;  // float4x4 + float2 + float2 + float4 flags
 
 enum class Init { untried, ok, failed };
 Init g_init = Init::untried;
@@ -153,7 +153,7 @@ bool InitNgx(device* dev) {
 // kStatsRing frames later, then logged every kStatsLogEvery DLSS frames.
 
 constexpr uint32_t kStatsRing = 4;
-constexpr uint32_t kStatsWords = 8;
+constexpr uint32_t kStatsWords = 12;
 constexpr uint64_t kStatsLogEvery = 60;
 resource g_stats[kStatsRing] = {}, g_statsReadback[kStatsRing] = {}, g_statsZero = {};
 resource_view g_statsUav[kStatsRing] = {};
@@ -207,6 +207,7 @@ void CollectStats(device* dev, uint32_t slot) {
     g_statsPending[slot] = false;
     for (uint32_t i = 0; i < 4; ++i) g_statsSum[i] += s[i];
     g_statsSum[5] += s[5];
+    for (uint32_t i = 8; i <= 10; ++i) g_statsSum[i] += s[i];
     g_statsMax = std::max(g_statsMax, s[4]);
     if (s[6]) g_statsDepthMin = std::min(g_statsDepthMin, ~s[6]);
     g_statsDepthMax = std::max(g_statsDepthMax, s[7]);
@@ -220,6 +221,15 @@ void CollectStats(device* dev, uint32_t slot) {
         "%.1f%% sky, depth %.6f..%.6f",
         g_statsFrames, 100.0 * g_statsSum[1] / n, 100.0 * g_statsSum[2] / n, g_statsSum[3] / 4.0 / n, g_statsMax / 16.0,
         100.0 * g_statsSum[5] / n, g_statsDepthMin == 0xffffffffu ? 0.0f : dmin, dmax);
+    // Object-velocity pixels: decoded game velocity vs what camera motion alone predicts.
+    // On static objects these match if the decode is right.
+    if (g_statsSum[1]) {
+        const double m = double(g_statsSum[1]);
+        LOG("dlss: object-velocity pixels: decoded mean %.2f px vs camera-only mean %.2f px; "
+            "%.1f%% decoded more than 4x camera + 1 px%s",
+            g_statsSum[8] / 16.0 / m, g_statsSum[9] / 16.0 / m, 100.0 * g_statsSum[10] / m,
+            g_options.ignoreVelocity ? " (game velocity ignored)" : "");
+    }
     memset(g_statsSum, 0, sizeof(g_statsSum));
     g_statsMax = g_statsDepthMax = g_statsFrames = 0;
     g_statsDepthMin = 0xffffffffu;
@@ -401,6 +411,8 @@ Result Evaluate(const Frame& f) {
     constants[17] = float(f.renderH);
     constants[18] = 1.0f / float(f.renderW);
     constants[19] = 1.0f / float(f.renderH);
+    constants[20] = g_options.ignoreVelocity ? 1.0f : 0.0f;
+    constants[21] = constants[22] = constants[23] = 0.0f;
     // Diagnostics slot for this frame: read what it held kStatsRing frames ago, clear it.
     const uint32_t slot = static_cast<uint32_t>(g_statsFrame++ % kStatsRing);
     CollectStats(dev, slot);
