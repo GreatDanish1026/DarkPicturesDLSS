@@ -221,6 +221,19 @@ sizes):
   motion for object-velocity pixels and adds "Ignore game velocity, camera motion only
   (test)".
 
+### Velocity decode is correct; stale velocity right after cuts (0.5.6, 18:43-18:45)
+
+- Decoded game velocity matches camera-only reprojection on object-velocity pixels
+  (0.37 vs 0.38 px, 0.36 vs 0.39, 0% inflated). The linear UE 4.26 decode is right.
+- "And scene." was **clean with DLSS on** this time, both with game velocity (18:44:27)
+  and camera-only (18:45:01). The corruption is intermittent.
+- In every run, the frames right after the cut into this shot have **stale game
+  velocity**: decoded 34-43 px vs camera 3 px with 20-40% inflated (0.5.6), and max 298 px
+  right after the reset in the corrupted 0.5.5 run. Probable cause of the intermittent
+  corruption: DLSS is reset only on the cut frame, then fed previous-shot velocities.
+  Proposed guard: camera-only motion for a few frames after a reset, plus a reset on the
+  frame after the cut.
+
 ### Crash report from a probe 0.3.1 session
 
 A `-dx12` session at 14:57-14:58 (probe 0.3.1) crashed about 9 s after a frame dump:
