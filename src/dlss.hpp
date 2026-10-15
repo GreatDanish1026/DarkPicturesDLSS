@@ -33,6 +33,7 @@ struct Options {
     bool flipJitterX = false;
     bool flipJitterY = false;
     bool mvJittered = false;  // DLSS feature flag; changing it recreates the feature
+    bool invertMotion = false;  // DLSS MV scale -1: tests the motion vector sign
 };
 extern Options g_options;
 

@@ -21,6 +21,12 @@ Texture2D<float> Depth : register(t1);      // R32_FLOAT_X8X24 view of the scene
 RWTexture2D<float2> OutMotion : register(u0);
 RWTexture2D<float> OutDepth : register(u1);
 
+// Diagnostics, over every 4th pixel in x and y (cleared to 0 each frame, read back by
+// dlss.cpp and logged): 0 sampled, 1 with object velocity, 2 moving more than 0.05 px,
+// 3 sum of |motion| x4 (capped at 4096 px), 4 max |motion| x16, 5 depth == 0 (sky),
+// 6 ~min depth bits (non-zero depths), 7 max depth bits.
+RWBuffer<uint> Stats : register(u2);
+
 float2 DecodeVelocity(float4 encoded)
 {
     const float invDiv = 1.0 / (0.499 * 0.5);
@@ -49,6 +55,28 @@ void main(uint2 id : SV_DispatchThreadID)
     }
 
     // Screen space (y up, -1..1) -> pixels (y down), and flip to current -> previous.
-    OutMotion[id] = -velocity * float2(0.5, -0.5) * ViewSize;
+    const float2 motion = -velocity * float2(0.5, -0.5) * ViewSize;
+    OutMotion[id] = motion;
     OutDepth[id] = deviceZ;
+
+    if ((id.x & 3) == 0 && (id.y & 3) == 0)
+    {
+        const float length = min(sqrt(dot(motion, motion)), 4096.0);
+        InterlockedAdd(Stats[0], 1);
+        if (encoded.x > 0.0)
+            InterlockedAdd(Stats[1], 1);
+        if (length > 0.05)
+            InterlockedAdd(Stats[2], 1);
+        InterlockedAdd(Stats[3], (uint)(length * 4.0));
+        InterlockedMax(Stats[4], (uint)(length * 16.0));
+        if (deviceZ == 0.0)
+        {
+            InterlockedAdd(Stats[5], 1);
+        }
+        else
+        {
+            InterlockedMax(Stats[6], ~asuint(deviceZ));
+            InterlockedMax(Stats[7], asuint(deviceZ));
+        }
+    }
 }

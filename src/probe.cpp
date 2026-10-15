@@ -1415,6 +1415,7 @@ void DrawOverlay(effect_runtime*) {
     ImGui::Checkbox("Flip jitter Y", &dlss::g_options.flipJitterY);
     ImGui::SameLine();
     ImGui::Checkbox("Motion vectors include jitter", &dlss::g_options.mvJittered);
+    ImGui::Checkbox("Invert motion vectors (test)", &dlss::g_options.invertMotion);
     if (g_api == device_api::d3d12)
         ImGui::Text("D3D12: %zu root signatures, %zu heaps, %llu descriptor writes, %llu copied, %zu mapped buffers",
                     g_layouts.size(), g_heaps.size(), static_cast<unsigned long long>(g_descriptorWrites),

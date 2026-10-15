@@ -129,6 +129,81 @@ bool InitNgx(device* dev) {
     return true;
 }
 
+// ---- motion vector diagnostics: the prepare pass counts into a small GPU buffer
+// (see Stats in dlss_prepare.hlsl), which is copied to a readback buffer and read
+// kStatsRing frames later, then logged every kStatsLogEvery DLSS frames.
+
+constexpr uint32_t kStatsRing = 4;
+constexpr uint32_t kStatsWords = 8;
+constexpr uint64_t kStatsLogEvery = 60;
+resource g_stats[kStatsRing] = {}, g_statsReadback[kStatsRing] = {}, g_statsZero = {};
+resource_view g_statsUav[kStatsRing] = {};
+bool g_statsPending[kStatsRing] = {};
+uint64_t g_statsFrame = 0;
+uint64_t g_statsSum[kStatsWords] = {};  // totals since the last log line
+uint32_t g_statsMax = 0, g_statsDepthMin = 0xffffffffu, g_statsDepthMax = 0, g_statsFrames = 0;
+
+bool CreateStats(device* dev) {
+    const uint32_t zeros[kStatsWords] = {};
+    const subresource_data init = {const_cast<uint32_t*>(zeros), sizeof(zeros), sizeof(zeros)};
+    if (!dev->create_resource(resource_desc(sizeof(zeros), memory_heap::default_, resource_usage::copy_source), &init,
+                              resource_usage::copy_source, &g_statsZero))
+        return false;
+    for (uint32_t i = 0; i < kStatsRing; ++i) {
+        const resource_desc gpu(sizeof(zeros), memory_heap::default_,
+                                resource_usage::unordered_access | resource_usage::copy_source | resource_usage::copy_dest);
+        const resource_desc cpu(sizeof(zeros), memory_heap::readback, resource_usage::copy_dest);
+        if (!dev->create_resource(gpu, nullptr, resource_usage::unordered_access, &g_stats[i]) ||
+            !dev->create_resource_view(g_stats[i], resource_usage::unordered_access,
+                                       resource_view_desc(format::r32_uint, 0, sizeof(zeros)), &g_statsUav[i]) ||
+            !dev->create_resource(cpu, nullptr, resource_usage::copy_dest, &g_statsReadback[i]))
+            return false;
+    }
+    return true;
+}
+
+void DestroyStats(device* dev) {
+    for (uint32_t i = 0; i < kStatsRing; ++i) {
+        if (g_statsUav[i].handle) dev->destroy_resource_view(g_statsUav[i]);
+        if (g_stats[i].handle) dev->destroy_resource(g_stats[i]);
+        if (g_statsReadback[i].handle) dev->destroy_resource(g_statsReadback[i]);
+        g_statsUav[i] = {};
+        g_stats[i] = g_statsReadback[i] = {};
+        g_statsPending[i] = false;
+    }
+    if (g_statsZero.handle) dev->destroy_resource(g_statsZero);
+    g_statsZero = {};
+}
+
+// Reads the slot written kStatsRing frames ago (long done on the GPU) and logs a summary.
+void CollectStats(device* dev, uint32_t slot) {
+    if (!g_statsPending[slot]) return;
+    void* p = nullptr;
+    if (!dev->map_buffer_region(g_statsReadback[slot], 0, kStatsWords * 4, map_access::read_only, &p) || !p) return;
+    uint32_t s[kStatsWords];
+    memcpy(s, p, sizeof(s));
+    dev->unmap_buffer_region(g_statsReadback[slot]);
+    g_statsPending[slot] = false;
+    for (uint32_t i = 0; i < 4; ++i) g_statsSum[i] += s[i];
+    g_statsSum[5] += s[5];
+    g_statsMax = std::max(g_statsMax, s[4]);
+    if (s[6]) g_statsDepthMin = std::min(g_statsDepthMin, ~s[6]);
+    g_statsDepthMax = std::max(g_statsDepthMax, s[7]);
+    if (++g_statsFrames < kStatsLogEvery) return;
+
+    const double n = g_statsSum[0] ? double(g_statsSum[0]) : 1.0;
+    float dmin = 0, dmax = 0;
+    memcpy(&dmin, &g_statsDepthMin, 4);
+    memcpy(&dmax, &g_statsDepthMax, 4);
+    LOG("dlss: motion over %u frames: %.1f%% object velocity, %.1f%% moving, mean %.2f px, max %.1f px, "
+        "%.1f%% sky, depth %.6f..%.6f",
+        g_statsFrames, 100.0 * g_statsSum[1] / n, 100.0 * g_statsSum[2] / n, g_statsSum[3] / 4.0 / n, g_statsMax / 16.0,
+        100.0 * g_statsSum[5] / n, g_statsDepthMin == 0xffffffffu ? 0.0f : dmin, dmax);
+    memset(g_statsSum, 0, sizeof(g_statsSum));
+    g_statsMax = g_statsDepthMax = g_statsFrames = 0;
+    g_statsDepthMin = 0xffffffffu;
+}
+
 bool CreatePipeline(device* dev) {
     pipeline_layout_param params[3];
     params[0] = pipeline_layout_param(constant_range{0, 0, 0, kConstants, shader_stage::compute});
@@ -140,6 +215,7 @@ bool CreatePipeline(device* dev) {
     srvs.visibility = shader_stage::compute;
     srvs.type = descriptor_type::shader_resource_view;
     descriptor_range uavs = srvs;
+    uavs.count = 3;  // motion, depth, stats buffer
     uavs.type = descriptor_type::unordered_access_view;
     params[1].type = pipeline_layout_param_type::push_descriptors_with_ranges;
     params[1].descriptor_table = {1, &srvs};
@@ -158,7 +234,7 @@ bool CreatePipeline(device* dev) {
         SetStatus("could not create the prepare pass pipeline");
         return false;
     }
-    return true;
+    return CreateStats(dev);
 }
 
 void DestroyTextures(device* dev) {
@@ -295,15 +371,27 @@ Result Evaluate(const Frame& f) {
     constants[17] = float(f.renderH);
     constants[18] = 1.0f / float(f.renderW);
     constants[19] = 1.0f / float(f.renderH);
+    // Diagnostics slot for this frame: read what it held kStatsRing frames ago, clear it.
+    const uint32_t slot = static_cast<uint32_t>(g_statsFrame++ % kStatsRing);
+    CollectStats(dev, slot);
+    cmd->barrier(g_stats[slot], resource_usage::unordered_access, resource_usage::copy_dest);
+    cmd->copy_buffer_region(g_statsZero, 0, g_stats[slot], 0, kStatsWords * 4);
+    cmd->barrier(g_stats[slot], resource_usage::copy_dest, resource_usage::unordered_access);
+
     cmd->bind_pipeline(pipeline_stage::compute_shader, g_pso);
     cmd->push_constants(shader_stage::compute, g_layout, 0, 0, kConstants, constants);
     const resource_view srvs[2] = {velocitySrv, depthSrv};
-    const resource_view uavs[2] = {g_motionUav, g_depthUav};
+    const resource_view uavs[3] = {g_motionUav, g_depthUav, g_statsUav[slot]};
     cmd->push_descriptors(shader_stage::compute, g_layout, 1,
                           descriptor_table_update{{}, 0, 0, 2, descriptor_type::shader_resource_view, srvs});
     cmd->push_descriptors(shader_stage::compute, g_layout, 2,
-                          descriptor_table_update{{}, 0, 0, 2, descriptor_type::unordered_access_view, uavs});
+                          descriptor_table_update{{}, 0, 0, 3, descriptor_type::unordered_access_view, uavs});
     cmd->dispatch((f.renderW + 7) / 8, (f.renderH + 7) / 8, 1);
+
+    cmd->barrier(g_stats[slot], resource_usage::unordered_access, resource_usage::copy_source);
+    cmd->copy_buffer_region(g_stats[slot], 0, g_statsReadback[slot], 0, kStatsWords * 4);
+    cmd->barrier(g_stats[slot], resource_usage::copy_source, resource_usage::unordered_access);
+    g_statsPending[slot] = true;
 
     const resource ours[2] = {g_motion, g_depth};
     const resource_usage uav[2] = {resource_usage::unordered_access, resource_usage::unordered_access};
@@ -321,8 +409,8 @@ Result Evaluate(const Frame& f) {
     e.InJitterOffsetY = g_options.flipJitterY ? -f.jitterY : f.jitterY;
     e.InRenderSubrectDimensions = {f.renderW, f.renderH};
     e.InReset = f.reset ? 1 : 0;
-    e.InMVScaleX = 1.0f;
-    e.InMVScaleY = 1.0f;
+    e.InMVScaleX = g_options.invertMotion ? -1.0f : 1.0f;
+    e.InMVScaleY = g_options.invertMotion ? -1.0f : 1.0f;
     e.InOutputSubrectBase = {f.outX, f.outY};
     const NVSDK_NGX_Result r = NGX_D3D12_EVALUATE_DLSS_EXT(list, g_feature, g_params, &e);
     cmd->barrier(2, ours, srv, uav);
@@ -353,6 +441,7 @@ void Shutdown(device* dev) {
     for (auto& [res, view] : g_srvs) dev->destroy_resource_view(view);
     g_srvs.clear();
     DestroyTextures(dev);
+    DestroyStats(dev);
     if (g_pso.handle) dev->destroy_pipeline(g_pso);
     if (g_layout.handle) dev->destroy_pipeline_layout(g_layout);
     g_pso = {};
