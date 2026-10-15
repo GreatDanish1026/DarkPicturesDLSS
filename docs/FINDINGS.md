@@ -175,6 +175,22 @@ sizes):
   full 3840x2160 output with output subrects enabled, and pass the letterbox as the
   output subrect.
 
+### DLSS smearing: motion vectors check out, camera cuts suspected (0.5.3)
+
+- 0.5.1 showed heavy smearing, stair-stepped echoes and rectangular blocks of stale
+  image during a cutscene (ReShade screenshot 15:40:58, DLSS in steady state).
+- 0.5.2 removed the device at launch. The stats buffer's typed UAV was given a byte
+  size, but **ReShade passes buffer view offset/size straight through as D3D12
+  FirstElement/NumElements** (elements). Fixed in 0.5.3.
+- 0.5.3 motion stats (render pixels, every 4th pixel): during pans the mean is 8-39 px
+  and the max 22-100 px with 100% of pixels moving; still camera about 0.01 px; depth
+  0.003-0.17; 14-49% of pixels carry object velocity. The magnitudes are sane. The sign
+  matches UE's FSR2 integration (MV = (-0.5 W Vx, +0.5 H Vy), current -> previous).
+- View UB rows used for cut detection: **row 18 = view forward** (= row 60), **row 67 =
+  WorldCameraOrigin** (cm). 0.5.4 resets DLSS on the TAA's bCameraCut **or** on a camera
+  jump over 2 m or a turn over 15 degrees in one frame, and logs each reset with its
+  reason and every overlay option change.
+
 ### Crash report from a probe 0.3.1 session
 
 A `-dx12` session at 14:57-14:58 (probe 0.3.1) crashed about 9 s after a frame dump:

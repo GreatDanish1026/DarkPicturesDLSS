@@ -1085,6 +1085,33 @@ bool IsTaau(uint64_t key) {
     return false;
 }
 
+// DLSS must be reset on a camera cut or it blends the previous shot into the new one.
+// The TAA's bCameraCut (cb0 row 0.z) may not be raised by the game's cinematic cameras,
+// so a jump of the camera (View.WorldCameraOrigin, cb1 row 67, UE cm) of more than 2 m
+// or a turn (View forward, cb1 row 18) of more than 15 degrees in one frame also counts.
+float g_prevOrigin[3] = {}, g_prevForward[3] = {};
+bool g_haveCamera = false;
+uint32_t g_cutsLogged = 0;
+
+bool DetectCameraCut(bool flag, const float* origin, const float* forward) {
+    float dist = 0, dot = 1;
+    if (g_haveCamera) {
+        const float dx = origin[0] - g_prevOrigin[0], dy = origin[1] - g_prevOrigin[1], dz = origin[2] - g_prevOrigin[2];
+        dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+        dot = forward[0] * g_prevForward[0] + forward[1] * g_prevForward[1] + forward[2] * g_prevForward[2];
+    }
+    memcpy(g_prevOrigin, origin, sizeof(g_prevOrigin));
+    memcpy(g_prevForward, forward, sizeof(g_prevForward));
+    const bool jump = g_haveCamera && (dist > 200.0f || dot < 0.966f);
+    g_haveCamera = true;
+    if ((flag || jump) && ++g_cutsLogged <= 200)
+        Log("dlss: reset at frame %llu: %s%s (camera moved %.0f cm, turned %.1f deg)",
+            static_cast<unsigned long long>(g_frame), flag ? "game camera-cut flag" : "",
+            jump ? (flag ? " + camera jump" : "camera jump") : "", dist,
+            std::acos(std::max(-1.0f, std::min(1.0f, dot))) * 57.29578f);
+    return flag || jump;
+}
+
 // Bindings and constants of one TAAU dispatch (FINDINGS.md, "TAAU path at 67%"):
 // t1 colour, t2 depth, t3 velocity, u0 output; cb0 row 27 render rect, row 24 output
 // rect, row 28.xy jitter, row 0.z camera cut; cb1 (View) rows 122-125 ClipToPrevClip.
@@ -1122,7 +1149,7 @@ bool BuildDlssFrame(command_list* cmd, const ContextState& st, dlss::Frame& f, s
     f.outH = static_cast<uint32_t>(row(cb0, 24)[3]) - f.outY;
     f.jitterX = row(cb0, 28)[0];
     f.jitterY = row(cb0, 28)[1];
-    f.reset = cameraCut != 0;
+    f.reset = DetectCameraCut(cameraCut != 0, row(cb1, 67), row(cb1, 18));
     memcpy(f.clipToPrevClip, row(cb1, 122), sizeof(f.clipToPrevClip));
 
     // During loading the game binds 1x1 placeholders (e.g. for velocity): every input
@@ -1416,6 +1443,17 @@ void DrawOverlay(effect_runtime*) {
     ImGui::SameLine();
     ImGui::Checkbox("Motion vectors include jitter", &dlss::g_options.mvJittered);
     ImGui::Checkbox("Invert motion vectors (test)", &dlss::g_options.invertMotion);
+
+    // Record option changes, so a test run can be read back from the log.
+    static dlss::Options logged = dlss::g_options;
+    const dlss::Options& o = dlss::g_options;
+    if (o.enabled != logged.enabled || o.flipJitterX != logged.flipJitterX || o.flipJitterY != logged.flipJitterY ||
+        o.mvJittered != logged.mvJittered || o.invertMotion != logged.invertMotion) {
+        Log("options at frame %llu: DLSS %s, flip jitter X %d Y %d, MVs jittered %d, invert MVs %d",
+            static_cast<unsigned long long>(g_frame), o.enabled ? "on" : "off", o.flipJitterX, o.flipJitterY,
+            o.mvJittered, o.invertMotion);
+        logged = o;
+    }
     if (g_api == device_api::d3d12)
         ImGui::Text("D3D12: %zu root signatures, %zu heaps, %llu descriptor writes, %llu copied, %zu mapped buffers",
                     g_layouts.size(), g_heaps.size(), static_cast<unsigned long long>(g_descriptorWrites),
