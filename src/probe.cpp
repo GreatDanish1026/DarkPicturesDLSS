@@ -19,13 +19,15 @@
 //   QuarryDLSS_frame_<n>.txt       full pass list of one frame (Ctrl+F11 or the overlay)
 //   QuarryDLSS_cbuffers_<n>.txt    constants of the large temporal passes, 8 frames (Ctrl+F10)
 //
-// Descriptor tables are not decoded, so on Direct3D 12 only render targets are
-// seen and compute passes report no inputs. Direct3D 11 is fully covered.
+// Direct3D 12 (-dx12) is covered by mirroring the descriptor heaps and root
+// signatures (see "Direct3D 12 descriptors") and reading constant buffers from the
+// game's persistently mapped upload memory.
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <d3d11.h>
-#include <dxgi.h>
+#include <d3d12.h>
+#include <dxgi1_4.h>
 
 #define ImTextureID ImU64
 #include <imgui.h>
@@ -38,10 +40,13 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "dxbc.hpp"
 #include "version.h"
+
+#pragma comment(lib, "dxgi.lib")
 
 extern "C" __declspec(dllexport) const char* NAME = "QuarryDLSS probe";
 extern "C" __declspec(dllexport) const char* DESCRIPTION =
@@ -59,7 +64,9 @@ constexpr uint64_t kGeometryKey = 0;  // writer key for scene geometry draws
 
 // ---------------------------------------------------------------- logging
 
-std::mutex g_mutex;  // guards everything below; events arrive on the RHI thread
+// Guards everything below; events arrive on the RHI thread. Recursive because the
+// probe maps D3D12 buffers itself, which can re-enter its own map event.
+std::recursive_mutex g_mutex;
 FILE* g_log = nullptr;
 std::wstring g_dir;  // game executable folder, with trailing slash
 
@@ -206,6 +213,67 @@ const ShaderDecl* FindDecl(uint64_t key) {
     return it != g_decls.end() && it->second.valid ? &it->second : nullptr;
 }
 
+// ---------------------------------------------------------------- Direct3D 12 descriptors
+//
+// D3D12 binds through descriptor heaps, so the probe mirrors them: every view the
+// game creates (update_descriptor_tables) and every CopyDescriptors into the
+// shader-visible heap (copy_descriptor_tables) is recorded per heap offset. Root
+// signatures (init_pipeline_layout) map a shader register to a root parameter and
+// an offset in the table bound there (bind_descriptor_tables).
+
+constexpr uint32_t kMaxRootParams = 64;
+
+struct HeapEntry {
+    uint64_t res = 0;       // resource (buffer for a CBV)
+    uint64_t cbOffset = 0;  // CBV: byte offset in the buffer
+    uint32_t viewFormat = 0;
+    uint8_t kind = 0;       // 0 empty, 1 SRV, 2 UAV, 3 CBV
+};
+std::unordered_map<uint64_t, std::vector<HeapEntry>> g_heaps;  // descriptor heap -> entries by offset
+
+struct LayoutParam {
+    pipeline_layout_param_type type;
+    std::vector<descriptor_range> ranges;  // table ranges with resolved offsets, or the one root descriptor
+};
+std::unordered_map<uint64_t, std::vector<LayoutParam>> g_layouts;  // root signature -> parameters
+
+std::unordered_set<uint64_t> g_live;  // D3D12 resources not yet destroyed
+uint64_t g_descriptorWrites = 0, g_descriptorCopies = 0;
+
+enum class Slot { srv, uav, cbv };
+
+bool RangeIs(descriptor_type t, Slot s) {
+    switch (s) {
+        case Slot::srv:
+            return t == descriptor_type::shader_resource_view || t == descriptor_type::buffer_shader_resource_view ||
+                   t == descriptor_type::sampler_with_resource_view;
+        case Slot::uav:
+            return t == descriptor_type::unordered_access_view || t == descriptor_type::buffer_unordered_access_view;
+        case Slot::cbv:
+            return t == descriptor_type::constant_buffer;
+    }
+    return false;
+}
+
+bool Visible(shader_stage visibility, bool compute) {
+    const auto stage = compute ? shader_stage::compute : shader_stage::pixel;
+    return (static_cast<uint32_t>(visibility) & static_cast<uint32_t>(stage)) != 0;
+}
+
+HeapEntry* HeapSlot(device* dev, descriptor_table table, uint32_t binding, bool create, uint32_t extra = 0) {
+    if (!table.handle) return nullptr;
+    descriptor_heap heap = {};
+    uint32_t offset = 0;
+    dev->get_descriptor_heap_offset(table, binding, 0, &heap, &offset);
+    if (!heap.handle) return nullptr;
+    auto& v = g_heaps[heap.handle];
+    if (offset + extra >= v.size()) {
+        if (!create) return offset < v.size() ? &v[offset] : nullptr;
+        v.resize((size_t(offset) + extra + 4096) & ~size_t(4095));
+    }
+    return &v[offset];
+}
+
 // ---------------------------------------------------------------- per-context state
 
 struct ContextState {
@@ -220,6 +288,9 @@ struct ContextState {
     resource_view dsv = {};
     bool targetsDirty = true;
     viewport vp = {};
+    // D3D12: root signature and bound descriptor tables, [0] graphics, [1] compute.
+    pipeline_layout layout[2] = {};
+    descriptor_table tables[2][kMaxRootParams] = {};
 };
 std::unordered_map<command_list*, ContextState> g_contexts;
 
@@ -298,6 +369,40 @@ bool ResolveView(device* dev, resource_view view, Binding& b) {
     return true;
 }
 
+bool IsLive(uint64_t res) { return g_api != device_api::d3d12 || g_live.count(res) != 0; }
+
+// D3D12: the heap entry behind shader register <reg> of the given kind, through the
+// bound root signature and descriptor tables.
+const HeapEntry* ResolveTableSlot(device* dev, const ContextState& st, bool compute, Slot kind, uint32_t reg) {
+    const int g = compute ? 1 : 0;
+    auto lit = g_layouts.find(st.layout[g].handle);
+    if (lit == g_layouts.end()) return nullptr;
+    const auto& params = lit->second;
+    for (uint32_t p = 0; p < params.size() && p < kMaxRootParams; ++p) {
+        if (params[p].type == pipeline_layout_param_type::push_descriptors ||
+            params[p].type == pipeline_layout_param_type::push_constants)
+            continue;
+        for (const auto& r : params[p].ranges) {
+            if (!RangeIs(r.type, kind) || r.dx_register_space != 0 || !Visible(r.visibility, compute) ||
+                reg < r.dx_register_index || reg - r.dx_register_index >= r.count)
+                continue;
+            const HeapEntry* e = HeapSlot(dev, st.tables[g][p], r.binding + (reg - r.dx_register_index), false);
+            return e && e->kind ? e : nullptr;
+        }
+    }
+    return nullptr;
+}
+
+bool ResolveEntry(device* dev, const HeapEntry* e, Binding& b) {
+    if (!e || !e->res || !IsLive(e->res)) return false;
+    b.res = {e->res};
+    b.desc = dev->get_resource_desc(b.res);
+    b.viewFormat = static_cast<format>(e->viewFormat);
+    auto it = g_writers.find(b.res.handle);
+    b.writer = it == g_writers.end() ? nullptr : &it->second;
+    return true;
+}
+
 bool IsHistory(const Binding& b, uint64_t key) {
     return b.writer && key != kGeometryKey && b.writer->key == key && b.writer->frame < g_frame &&
            g_frame - b.writer->frame <= 2;
@@ -333,10 +438,42 @@ void MarkWritten(resource res, uint64_t key) {
     if (res.handle) g_writers[res.handle] = {key, g_frame, g_pass};
 }
 
+std::unordered_map<uint64_t, uint8_t*> g_mapped;  // D3D12 buffer -> CPU address of byte 0 (persistent maps)
+
+// Copies up to <bytes> of a constant buffer: from the shadow copy on D3D11, from the
+// game's persistently mapped upload memory on D3D12 (mapping it ourselves if needed).
+bool ReadConstants(device* dev, const buffer_range& r, uint64_t bytes, std::vector<uint8_t>& out) {
+    out.clear();
+    if (!r.buffer.handle) return false;
+    if (g_api != device_api::d3d12) {
+        auto it = g_cbData.find(r.buffer.handle);
+        if (it == g_cbData.end() || r.offset >= it->second.size()) return false;
+        bytes = std::min<uint64_t>(bytes, it->second.size() - r.offset);
+        out.assign(it->second.begin() + r.offset, it->second.begin() + r.offset + bytes);
+        return true;
+    }
+    if (!IsLive(r.buffer.handle)) return false;
+    const auto desc = dev->get_resource_desc(r.buffer);
+    if (desc.type != resource_type::buffer || r.offset >= desc.buffer.size) return false;
+    bytes = std::min<uint64_t>(bytes, desc.buffer.size - r.offset);
+    out.resize(bytes);
+    if (auto it = g_mapped.find(r.buffer.handle); it != g_mapped.end()) {
+        memcpy(out.data(), it->second + r.offset, bytes);
+        return true;
+    }
+    void* p = nullptr;
+    if (desc.heap == memory_heap::default_) return false;  // not CPU-visible
+    if (!dev->map_buffer_region(r.buffer, r.offset, bytes, map_access::read_only, &p) || !p) return false;
+    memcpy(out.data(), p, bytes);
+    dev->unmap_buffer_region(r.buffer);
+    return true;
+}
+
 // Each declared constant buffer as float4 rows: values, then raw bits.
-std::string DumpConstantBuffers(const buffer_range* cbs, const ShaderDecl* decl) {
+std::string DumpConstantBuffers(device* dev, const buffer_range* cbs, const ShaderDecl* decl) {
     std::string s;
     char line[192];
+    std::vector<uint8_t> data;
     for (uint32_t i = 0; i < kMaxCb; ++i) {
         if (decl ? !decl->HasCb(i) : !cbs[i].buffer.handle) continue;
         const buffer_range& r = cbs[i];
@@ -344,19 +481,15 @@ std::string DumpConstantBuffers(const buffer_range* cbs, const ShaderDecl* decl)
         snprintf(line, sizeof(line), "  cb%u: buffer %llx, offset %llu, declared %u float4\n", i,
                  static_cast<unsigned long long>(r.buffer.handle), static_cast<unsigned long long>(r.offset), declared);
         s += line;
-        auto it = g_cbData.find(r.buffer.handle);
-        if (!r.buffer.handle || it == g_cbData.end()) {
+        if (!ReadConstants(dev, r, declared ? declared * 16ull : 4096ull, data)) {
             s += "    (contents not captured)\n";
             continue;
         }
-        const auto& data = it->second;
-        if (r.offset >= data.size()) continue;
-        uint64_t rows = (data.size() - r.offset) / 16;
-        if (declared) rows = std::min<uint64_t>(rows, declared);
+        const uint64_t rows = data.size() / 16;
         for (uint64_t row = 0; row < rows; ++row) {
             float f[4];
             uint32_t u[4];
-            memcpy(f, data.data() + r.offset + row * 16, 16);
+            memcpy(f, data.data() + row * 16, 16);
             memcpy(u, f, 16);
             snprintf(line, sizeof(line), "    [%3llu] %14.7g %14.7g %14.7g %14.7g | %08x %08x %08x %08x\n",
                      static_cast<unsigned long long>(row), f[0], f[1], f[2], f[3], u[0], u[1], u[2], u[3]);
@@ -375,21 +508,24 @@ void OnPass(command_list* cmd, bool compute, const char* what) {
 
     // Only slots the shader declares; the D3D11 RHI leaves earlier views bound.
     const ShaderDecl* decl = FindDecl(key);
+    const bool d3d12 = g_api == device_api::d3d12;
     std::vector<Binding> in, out;
     const resource_view* srv = compute ? st.csSrv : st.psSrv;
-    for (uint32_t i = 0; i < kMaxSrv; ++i) {
-        if (decl && !decl->HasSrv(i)) continue;
+    // D3D12 needs the declarations to know which registers to look up; up to t127.
+    for (uint32_t i = 0; i < (d3d12 ? 128u : kMaxSrv); ++i) {
+        if (decl ? !decl->HasSrv(i) : d3d12) continue;
         Binding b{};
-        if (ResolveView(dev, srv[i], b)) {
+        if (d3d12 ? ResolveEntry(dev, ResolveTableSlot(dev, st, compute, Slot::srv, i), b) : ResolveView(dev, srv[i], b)) {
             snprintf(b.slot, sizeof(b.slot), "t%u", i);
             in.push_back(b);
         }
     }
     if (compute) {
-        for (uint32_t i = 0; i < kMaxUav; ++i) {
-            if (decl && !decl->HasUav(i)) continue;
+        for (uint32_t i = 0; i < (d3d12 ? 64u : kMaxUav); ++i) {
+            if (decl ? !decl->HasUav(i) : d3d12) continue;
             Binding b{};
-            if (ResolveView(dev, st.csUav[i], b)) {
+            if (d3d12 ? ResolveEntry(dev, ResolveTableSlot(dev, st, true, Slot::uav, i), b)
+                      : ResolveView(dev, st.csUav[i], b)) {
                 snprintf(b.slot, sizeof(b.slot), "u%u", i);
                 out.push_back(b);
             }
@@ -472,7 +608,15 @@ void OnPass(command_list* cmd, bool compute, const char* what) {
                  static_cast<unsigned long long>(g_frame), g_pass, compute ? "CS" : "PS",
                  static_cast<unsigned long long>(key), inW, inH, outW, outH);
         g_cbDump += head;
-        g_cbDump += DumpConstantBuffers(compute ? st.csCb : st.psCb, decl);
+        // Root CBVs come from push_descriptors; CBVs inside descriptor tables are looked up.
+        buffer_range cbs[kMaxCb];
+        memcpy(cbs, compute ? st.csCb : st.psCb, sizeof(cbs));
+        if (d3d12)
+            for (uint32_t i = 0; i < kMaxCb; ++i)
+                if (!cbs[i].buffer.handle && decl && decl->HasCb(i))
+                    if (const HeapEntry* e = ResolveTableSlot(dev, st, compute, Slot::cbv, i))
+                        cbs[i] = {{e->res}, e->cbOffset, UINT64_MAX};
+        g_cbDump += DumpConstantBuffers(dev, cbs, decl);
         g_cbDump += "\n";
     }
 
@@ -558,8 +702,22 @@ void OnInitDevice(device* dev) {
             dxgi->Release();
         }
     } else if (g_api == device_api::d3d12) {
-        Log("D3D12: descriptor tables are not decoded by this probe, so compute passes will show no "
-            "inputs. Render-target writes are still tracked.");
+        auto d3d = reinterpret_cast<ID3D12Device*>(dev->get_native());
+        const LUID luid = d3d->GetAdapterLuid();
+        IDXGIFactory4* factory = nullptr;
+        if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory4), reinterpret_cast<void**>(&factory)))) {
+            IDXGIAdapter* adapter = nullptr;
+            if (SUCCEEDED(factory->EnumAdapterByLuid(luid, __uuidof(IDXGIAdapter), reinterpret_cast<void**>(&adapter)))) {
+                DXGI_ADAPTER_DESC ad;
+                if (SUCCEEDED(adapter->GetDesc(&ad))) {
+                    g_adapter = Narrow(ad.Description);
+                    Log("adapter: %s, %llu MB video memory", g_adapter.c_str(),
+                        static_cast<unsigned long long>(ad.DedicatedVideoMemory >> 20));
+                }
+                adapter->Release();
+            }
+            factory->Release();
+        }
     }
 }
 
@@ -612,6 +770,8 @@ void OnDestroyPipeline(device*, pipeline p) {
 void OnDestroyResource(device*, resource r) {
     std::lock_guard lock(g_mutex);
     g_writers.erase(r.handle);
+    g_live.erase(r.handle);
+    g_mapped.erase(r.handle);
     if (g_cbSize.erase(r.handle)) {
         g_cbData.erase(r.handle);
         g_maps.erase(r.handle);
@@ -621,6 +781,11 @@ void OnDestroyResource(device*, resource r) {
 // ---------------------------------------------------------------- constant buffer shadows
 
 void OnInitResource(device*, const resource_desc& desc, const subresource_data* init, resource_usage, resource r) {
+    if (g_api == device_api::d3d12) {
+        std::lock_guard lock(g_mutex);
+        g_live.insert(r.handle);
+        return;
+    }
     if (desc.type != resource_type::buffer || desc.buffer.size == 0 || desc.buffer.size > 65536 ||
         (static_cast<uint32_t>(desc.usage) & static_cast<uint32_t>(resource_usage::constant_buffer)) == 0)
         return;
@@ -643,6 +808,10 @@ void WriteShadow(resource r, uint64_t offset, uint64_t size, const void* src) {
 void OnMapBuffer(device*, resource r, uint64_t offset, uint64_t size, map_access access, void** data) {
     if (access == map_access::read_only || !data || !*data) return;
     std::lock_guard lock(g_mutex);
+    if (g_api == device_api::d3d12) {  // UE keeps upload buffers mapped for their whole life
+        g_mapped[r.handle] = static_cast<uint8_t*>(*data) - offset;
+        return;
+    }
     auto it = g_cbSize.find(r.handle);
     if (it == g_cbSize.end() || offset >= it->second) return;
     g_maps[r.handle] = {static_cast<uint8_t*>(*data), offset, std::min(size, it->second - offset)};
@@ -650,6 +819,10 @@ void OnMapBuffer(device*, resource r, uint64_t offset, uint64_t size, map_access
 
 void OnUnmapBuffer(device*, resource r) {
     std::lock_guard lock(g_mutex);
+    if (g_api == device_api::d3d12) {
+        g_mapped.erase(r.handle);
+        return;
+    }
     auto it = g_maps.find(r.handle);
     if (it == g_maps.end()) return;
     WriteShadow(r, it->second.offset, it->second.size, it->second.ptr);
@@ -668,6 +841,116 @@ bool OnUpdateBufferCommand(command_list*, const void* data, resource dest, uint6
     return false;
 }
 
+// ---------------------------------------------------------------- D3D12 descriptor events
+
+void OnInitPipelineLayout(device*, uint32_t count, const pipeline_layout_param* params, pipeline_layout layout) {
+    std::vector<LayoutParam> out(count);
+    for (uint32_t p = 0; p < count; ++p) {
+        out[p].type = params[p].type;
+        switch (params[p].type) {
+            case pipeline_layout_param_type::push_descriptors:
+                out[p].ranges.push_back(params[p].push_descriptors);
+                break;
+            case pipeline_layout_param_type::descriptor_table:
+            case pipeline_layout_param_type::push_descriptors_with_ranges:
+                for (uint32_t k = 0; k < params[p].descriptor_table.count; ++k)
+                    out[p].ranges.push_back(params[p].descriptor_table.ranges[k]);
+                break;
+            case pipeline_layout_param_type::descriptor_table_with_flags:
+            case pipeline_layout_param_type::push_descriptors_with_ranges_and_flags:
+                for (uint32_t k = 0; k < params[p].descriptor_table_with_flags.count; ++k)
+                    out[p].ranges.push_back(params[p].descriptor_table_with_flags.ranges[k]);
+                break;
+            default:
+                break;
+        }
+        // D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND: the range follows the previous one.
+        uint32_t next = 0;
+        for (auto& r : out[p].ranges) {
+            if (r.binding == UINT32_MAX) r.binding = next;
+            next = r.binding + r.count;
+        }
+    }
+    std::lock_guard lock(g_mutex);
+    g_layouts[layout.handle] = std::move(out);
+}
+
+// CreateShaderResourceView / CreateUnorderedAccessView / CreateConstantBufferView.
+bool OnUpdateDescriptorTables(device* dev, uint32_t count, const descriptor_table_update* updates) {
+    if (g_api != device_api::d3d12) return false;
+    std::lock_guard lock(g_mutex);
+    for (uint32_t k = 0; k < count; ++k) {
+        const auto& u = updates[k];
+        uint8_t kind;
+        if (RangeIs(u.type, Slot::srv)) kind = 1;
+        else if (RangeIs(u.type, Slot::uav)) kind = 2;
+        else if (RangeIs(u.type, Slot::cbv)) kind = 3;
+        else continue;
+        if (!u.descriptors || !u.count) continue;
+        HeapEntry* base = HeapSlot(dev, u.table, u.binding, true, u.count - 1);
+        if (!base) continue;
+        for (uint32_t i = 0; i < u.count; ++i) {
+            HeapEntry e;
+            e.kind = kind;
+            if (kind == 3) {
+                const auto& r = static_cast<const buffer_range*>(u.descriptors)[i];
+                e.res = r.buffer.handle;
+                e.cbOffset = r.offset;
+            } else {
+                const resource_view view = static_cast<const resource_view*>(u.descriptors)[i];
+                if (view.handle) {
+                    e.res = dev->get_resource_from_view(view).handle;
+                    e.viewFormat = static_cast<uint32_t>(dev->get_resource_view_desc(view).format);
+                }
+            }
+            base[i] = e;
+            ++g_descriptorWrites;
+        }
+    }
+    return false;
+}
+
+// CopyDescriptors(Simple), mostly offline heap -> shader-visible heap.
+bool OnCopyDescriptorTables(device* dev, uint32_t count, const descriptor_table_copy* copies) {
+    if (g_api != device_api::d3d12) return false;
+    std::lock_guard lock(g_mutex);
+    for (uint32_t k = 0; k < count; ++k) {
+        const auto& c = copies[k];
+        if (!c.count) continue;
+        HeapEntry* dst = HeapSlot(dev, c.dest_table, c.dest_binding, true, c.count - 1);
+        if (!dst) continue;
+        // The source heap may be shorter than the copy if part of it was never written.
+        descriptor_heap heap = {};
+        uint32_t offset = 0;
+        dev->get_descriptor_heap_offset(c.source_table, c.source_binding, 0, &heap, &offset);
+        auto it = g_heaps.find(heap.handle);
+        for (uint32_t i = 0; i < c.count; ++i)
+            dst[i] = it != g_heaps.end() && offset + i < it->second.size() ? it->second[offset + i] : HeapEntry{};
+        g_descriptorCopies += c.count;
+    }
+    return false;
+}
+
+void OnBindDescriptorTables(command_list* cmd, shader_stage stages, pipeline_layout layout, uint32_t first,
+                            uint32_t count, const descriptor_table* tables, uint32_t, const uint32_t*) {
+    if (g_api != device_api::d3d12) return;
+    const int g = (static_cast<uint32_t>(stages) & static_cast<uint32_t>(shader_stage::compute)) ? 1 : 0;
+    std::lock_guard lock(g_mutex);
+    auto& st = g_contexts[cmd];
+    if (st.layout[g].handle != layout.handle) {  // new root signature: old bindings are gone
+        st.layout[g] = layout;
+        for (auto& t : st.tables[g]) t = {};
+        buffer_range* cbs = g ? st.csCb : st.psCb;
+        std::fill(cbs, cbs + kMaxCb, buffer_range{});
+    }
+    for (uint32_t i = 0; i < count && first + i < kMaxRootParams; ++i) st.tables[g][first + i] = tables[i];
+}
+
+void OnResetCommandList(command_list* cmd) {
+    std::lock_guard lock(g_mutex);
+    if (auto it = g_contexts.find(cmd); it != g_contexts.end()) it->second = ContextState{};
+}
+
 void OnBindPipeline(command_list* cmd, pipeline_stage stages, pipeline p) {
     std::lock_guard lock(g_mutex);
     auto& st = g_contexts[cmd];
@@ -679,7 +962,19 @@ void OnBindPipeline(command_list* cmd, pipeline_stage stages, pipeline p) {
     if (has(pipeline_stage::vertex_shader)) st.vs = info.vs;
 }
 
-void OnPushDescriptors(command_list* cmd, shader_stage stages, pipeline_layout, uint32_t,
+// D3D12 root descriptors (SetCompute/GraphicsRootConstantBufferView): the root
+// signature says which register and stage the parameter feeds.
+void OnPushRootDescriptor(ContextState& st, bool compute, pipeline_layout layout, uint32_t param,
+                          const descriptor_table_update& u) {
+    if (u.type != descriptor_type::constant_buffer || !u.descriptors || !u.count) return;
+    auto lit = g_layouts.find(layout.handle);
+    if (lit == g_layouts.end() || param >= lit->second.size() || lit->second[param].ranges.empty()) return;
+    const descriptor_range& r = lit->second[param].ranges[0];
+    if (r.dx_register_space != 0 || !Visible(r.visibility, compute) || r.dx_register_index >= kMaxCb) return;
+    (compute ? st.csCb : st.psCb)[r.dx_register_index] = static_cast<const buffer_range*>(u.descriptors)[0];
+}
+
+void OnPushDescriptors(command_list* cmd, shader_stage stages, pipeline_layout layout, uint32_t param,
                        const descriptor_table_update& u) {
     const bool cs = (static_cast<uint32_t>(stages) & static_cast<uint32_t>(shader_stage::compute)) != 0;
     const bool ps = (static_cast<uint32_t>(stages) & static_cast<uint32_t>(shader_stage::pixel)) != 0;
@@ -688,6 +983,10 @@ void OnPushDescriptors(command_list* cmd, shader_stage stages, pipeline_layout, 
     uint32_t cap = 0;
     std::lock_guard lock(g_mutex);
     auto& st = g_contexts[cmd];
+    if (g_api == device_api::d3d12) {
+        OnPushRootDescriptor(st, cs, layout, param, u);
+        return;
+    }
     if (u.type == descriptor_type::constant_buffer) {
         buffer_range* cbs = cs ? st.csCb : st.psCb;
         auto ranges = static_cast<const buffer_range*>(u.descriptors);
@@ -857,7 +1156,12 @@ void DrawOverlay(effect_runtime*) {
     if (ImGui::Button(g_cbDumpFirst ? "Capturing constants..." : "Dump TAA constants, 8 frames (Ctrl+F10)"))
         RequestCbDump();
     if (!g_lastCbDumpFile.empty()) ImGui::Text("Last constants dump: %s", g_lastCbDumpFile.c_str());
-    ImGui::Text("Constant buffers tracked: %zu", g_cbSize.size());
+    if (g_api == device_api::d3d12)
+        ImGui::Text("D3D12: %zu root signatures, %zu heaps, %llu descriptor writes, %llu copied, %zu mapped buffers",
+                    g_layouts.size(), g_heaps.size(), static_cast<unsigned long long>(g_descriptorWrites),
+                    static_cast<unsigned long long>(g_descriptorCopies), g_mapped.size());
+    else
+        ImGui::Text("Constant buffers tracked: %zu", g_cbSize.size());
     ImGui::TextUnformatted("Log: QuarryDLSS.log next to the game executable.");
 }
 
@@ -870,6 +1174,11 @@ void Install() {
     reshade::register_event<reshade::addon_event::destroy_pipeline>(&OnDestroyPipeline);
     reshade::register_event<reshade::addon_event::destroy_resource>(&OnDestroyResource);
     reshade::register_event<reshade::addon_event::init_resource>(&OnInitResource);
+    reshade::register_event<reshade::addon_event::init_pipeline_layout>(&OnInitPipelineLayout);
+    reshade::register_event<reshade::addon_event::update_descriptor_tables>(&OnUpdateDescriptorTables);
+    reshade::register_event<reshade::addon_event::copy_descriptor_tables>(&OnCopyDescriptorTables);
+    reshade::register_event<reshade::addon_event::bind_descriptor_tables>(&OnBindDescriptorTables);
+    reshade::register_event<reshade::addon_event::reset_command_list>(&OnResetCommandList);
     reshade::register_event<reshade::addon_event::map_buffer_region>(&OnMapBuffer);
     reshade::register_event<reshade::addon_event::unmap_buffer_region>(&OnUnmapBuffer);
     reshade::register_event<reshade::addon_event::update_buffer_region>(&OnUpdateBuffer);

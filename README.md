@@ -56,7 +56,9 @@ Then step 2 can map the engine hooks (the temporal upscaler slot, jitter, camera
 
 ## Limits of the probe
 
-- On Direct3D 12, descriptor tables aren't decoded, so compute passes show no inputs.
-  Draws and render targets still show up.
+- On Direct3D 12 (`-dx12`), bindings are rebuilt by mirroring the game's descriptor heaps
+  (view creation and CopyDescriptors) and root signatures, and constant buffers are read
+  from the game's mapped upload memory. If the overlay's D3D12 line shows 0 heaps or 0
+  descriptor writes, that mirroring isn't working and the probe will find no temporal passes.
 - Passes are identified by the first 8 bytes of the shader's DXBC digest. These stay the
   same between runs of the same game build.
