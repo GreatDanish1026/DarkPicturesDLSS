@@ -89,6 +89,24 @@ the test Engine.ini was removed. **The mod has to set the screen percentage in-e
 as Days Gone writes the cvar data directly each frame, or by hooking whatever the game
 uses to set it.
 
+### Console variables in memory
+
+From the exe's own code (cvar registration and lookup sites next to
+`L"r.ScreenPercentage"` / `L"r.TemporalAA.Upsampling"`):
+
+- `IConsoleManager::Singleton` is at **exe+0x709acd0**. Every lookup loads it with
+  `mov rcx, [rip+x]`, and probe 0.4 finds it from that pattern in 16 ms.
+- IConsoleManager vtable: +0x10 `RegisterConsoleVariable(float)`, +0x18
+  `RegisterConsoleVariable(int)`, **+0xb0 `FindConsoleVariable(name, bTrackFrequentCalls)`**.
+- IConsoleVariable vtable: **+0x58 `AsVariableInt`**, **+0x60 `AsVariableFloat`**, each
+  returning `TConsoleVariableData<T>*` (game-thread value at [0], render-thread at [1]).
+- The `TAutoConsoleVariable` for r.ScreenPercentage is at exe+0x70eeff8 (vptr, Target
+  +8, Ref +0x10), and r.TemporalAA.Upsampling at exe+0x71f06c0.
+
+Probe 0.4 writes r.ScreenPercentage (default 67) and r.TemporalAA.Upsampling = 1 into both
+copies every frame, logs any time the game changes them back, and has an overlay checkbox
+and slider. Result pending.
+
 ### Ctrl+F11 toggled the game to windowed mode
 
 UE toggles fullscreen on F11, so every Ctrl+F11 frame dump also switched the game to its

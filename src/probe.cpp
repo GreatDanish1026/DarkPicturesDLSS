@@ -43,6 +43,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "cvars.hpp"
 #include "dxbc.hpp"
 #include "version.h"
 
@@ -347,6 +348,8 @@ uint64_t g_cbDumpFirst = 0, g_cbDumpLast = 0;
 std::string g_cbDump;
 std::string g_lastCbDumpFile;
 uint32_t g_mainInW = 0, g_mainInH = 0, g_mainOutW = 0, g_mainOutH = 0;
+
+std::string RenderScaleStatus();  // forced render scale, defined with ApplyRenderScale
 
 // ---------------------------------------------------------------- pass analysis
 
@@ -663,6 +666,7 @@ void WriteDump() {
         fprintf(f, "QuarryDLSS probe %s - frame %llu\nAPI: %s\nadapter: %s\nswap chain: %s\n\n", QDLSS_VERSION,
                 static_cast<unsigned long long>(g_dumpFrame), ApiName(g_api), g_adapter.c_str(),
                 g_swapchain.c_str());
+        fprintf(f, "render scale: %s\n\n", RenderScaleStatus().c_str());
         fprintf(f, "Post-process passes in order (dispatches and full-screen draws). Inputs are\n"
                    "marked with the pass that wrote them this frame; HISTORY marks a texture the\n"
                    "same shader wrote last frame.\n\n");
@@ -1078,6 +1082,7 @@ void WriteCbDump() {
         fprintf(f, "QuarryDLSS probe %s - constant buffers, frames %llu-%llu\nswap chain: %s\n\n", QDLSS_VERSION,
                 static_cast<unsigned long long>(g_cbDumpFirst), static_cast<unsigned long long>(g_cbDumpLast),
                 g_swapchain.c_str());
+        fprintf(f, "render scale: %s\n\n", RenderScaleStatus().c_str());
         fprintf(f, "Every temporal pass with an output of at least a quarter of the back buffer.\n"
                    "Rows are float4: values, then raw bits. Jitter shows as small values that\n"
                    "change every frame and repeat with the TAA sample count.\n\n");
@@ -1115,9 +1120,95 @@ void RequestCbDump() {
     }
 }
 
+// ---------------------------------------------------------------- forced render scale
+//
+// The game ignores r.ScreenPercentage from Engine.ini, so the probe writes the
+// cvar data directly every frame (both the game-thread and render-thread copies),
+// together with r.TemporalAA.Upsampling=1, to make the main TAA upsample (TAAU).
+
+enum class CvarState { untried, waiting, ready, failed };
+CvarState g_cvarState = CvarState::untried;
+void** g_cvarSingleton = nullptr;
+float* g_screenPercentage = nullptr;  // TConsoleVariableData<float>::ShadowedValue[2]
+int32_t* g_taaUpsampling = nullptr;   // TConsoleVariableData<int32>::ShadowedValue[2]
+float g_originalPercentage = 100.0f;
+int32_t g_originalUpsampling = 0;
+bool g_forceScale = true;
+bool g_forcing = false;  // values currently overwritten
+float g_forcePercentage = 67.0f;
+uint32_t g_foreignWrites = 0;  // times the game changed a forced value
+
+void FindCvars() {
+    if (g_cvarState == CvarState::untried) {
+        g_cvarSingleton = cvars::FindConsoleManagerSingleton(reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr)));
+        if (!g_cvarSingleton) {
+            g_cvarState = CvarState::failed;
+            Log("cvars: IConsoleManager::Singleton not found (no lea of L\"r.ScreenPercentage\" after mov rcx,[rip+x])");
+            return;
+        }
+        Log("cvars: IConsoleManager::Singleton at exe+0x%llx",
+            static_cast<unsigned long long>(reinterpret_cast<uint8_t*>(g_cvarSingleton) -
+                                            reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr))));
+        g_cvarState = CvarState::waiting;
+    }
+    void* manager = *g_cvarSingleton;
+    if (!manager) return;  // engine not up yet
+    auto sp = static_cast<float*>(cvars::FindData(manager, L"r.ScreenPercentage", true));
+    auto up = static_cast<int32_t*>(cvars::FindData(manager, L"r.TemporalAA.Upsampling", false));
+    // Sanity check before ever writing: a wrong vtable layout would hand back something else.
+    if (!sp || !up || !(sp[0] >= 1.0f && sp[0] <= 400.0f) || up[0] < 0 || up[0] > 2) {
+        g_cvarState = CvarState::failed;
+        Log("cvars: lookup failed or implausible (r.ScreenPercentage %p = %g, r.TemporalAA.Upsampling %p = %d); "
+            "not forcing anything",
+            static_cast<void*>(sp), sp ? sp[0] : 0.0, static_cast<void*>(up), up ? up[0] : 0);
+        return;
+    }
+    g_screenPercentage = sp;
+    g_taaUpsampling = up;
+    g_originalPercentage = sp[0];
+    g_originalUpsampling = up[0];
+    g_cvarState = CvarState::ready;
+    Log("cvars: r.ScreenPercentage = %g / %g (game / render thread), r.TemporalAA.Upsampling = %d / %d", sp[0], sp[1],
+        up[0], up[1]);
+}
+
+void ApplyRenderScale() {
+    if (g_cvarState == CvarState::untried || g_cvarState == CvarState::waiting) FindCvars();
+    if (g_cvarState != CvarState::ready) return;
+    float* sp = g_screenPercentage;
+    int32_t* up = g_taaUpsampling;
+    if (!g_forceScale) {
+        if (g_forcing) {  // give the game its own values back
+            sp[0] = sp[1] = g_originalPercentage;
+            up[0] = up[1] = g_originalUpsampling;
+            g_forcing = false;
+            Log("cvars: restored r.ScreenPercentage %g, r.TemporalAA.Upsampling %d", g_originalPercentage,
+                g_originalUpsampling);
+        }
+        return;
+    }
+    if (g_forcing && (sp[0] != g_forcePercentage || up[0] != 1) && ++g_foreignWrites <= 10)
+        Log("cvars: the game changed a forced value: r.ScreenPercentage %g / %g, r.TemporalAA.Upsampling %d / %d%s",
+            sp[0], sp[1], up[0], up[1], g_foreignWrites == 10 ? " (not logging further changes)" : "");
+    if (!g_forcing) Log("cvars: forcing r.ScreenPercentage %g and r.TemporalAA.Upsampling 1", g_forcePercentage);
+    sp[0] = sp[1] = g_forcePercentage;
+    up[0] = up[1] = 1;
+    g_forcing = true;
+}
+
+std::string RenderScaleStatus() {
+    char buf[160];
+    if (g_cvarState != CvarState::ready) return "console variables not found";
+    snprintf(buf, sizeof(buf), "r.ScreenPercentage %.1f, r.TemporalAA.Upsampling %d (%s; game's own %.0f, %d)",
+             g_screenPercentage[0], g_taaUpsampling[0], g_forcing ? "forced by the probe" : "not forced",
+             g_originalPercentage, g_originalUpsampling);
+    return buf;
+}
+
 void OnReshadePresent(effect_runtime* rt) {
     std::lock_guard lock(g_mutex);
     UpdateSwapchainInfo(rt);
+    ApplyRenderScale();
     if (rt->is_key_down(VK_CONTROL) && rt->is_key_pressed(VK_F9)) RequestDump();  // not F11: UE toggles fullscreen on it
     if (rt->is_key_down(VK_CONTROL) && rt->is_key_pressed(VK_F10)) RequestCbDump();
 }
@@ -1128,6 +1219,18 @@ void DrawOverlay(effect_runtime*) {
     if (!g_adapter.empty()) ImGui::Text("Adapter: %s", g_adapter.c_str());
     ImGui::Text("Swap chain: %s", g_swapchain.c_str());
     ImGui::Text("Frame %llu", static_cast<unsigned long long>(g_frame));
+    ImGui::Separator();
+    switch (g_cvarState) {
+        case CvarState::ready:
+            ImGui::Checkbox("Force render scale + TAA upsampling", &g_forceScale);
+            ImGui::SliderFloat("Screen percentage", &g_forcePercentage, 33.0f, 100.0f, "%.0f%%");
+            ImGui::Text("Now: r.ScreenPercentage %.1f, r.TemporalAA.Upsampling %d (game's own: %.0f, %d)",
+                        g_screenPercentage[0], g_taaUpsampling[0], g_originalPercentage, g_originalUpsampling);
+            if (g_foreignWrites) ImGui::Text("The game changed the forced values %u time(s), see the log.", g_foreignWrites);
+            break;
+        case CvarState::failed: ImGui::TextUnformatted("Render scale: console variables not found (see log)."); break;
+        default: ImGui::TextUnformatted("Render scale: waiting for the engine..."); break;
+    }
     ImGui::Separator();
     if (g_mainKey) {
         ImGui::Text("Main TAA guess: %016llx", static_cast<unsigned long long>(g_mainKey));
