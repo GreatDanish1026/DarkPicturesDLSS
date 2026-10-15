@@ -236,6 +236,13 @@ sizes):
 - **0.5.7 adds the guard:** DLSS InReset on the cut frame and the next one, and
   camera-only motion for 4 frames after any reset (game cut flag, camera jump or feature
   switch).
+- **0.5.7 didn't fix it:** corrupted again at "Yah!" (18:49:16, 0.1 s after the cut at
+  15.908). In the ~60 frames after that cut, object pixels averaged **47 px decoded vs
+  4.6 px camera** (37% inflated, max 309 px), back to 4.88 vs 4.91 in the next window. So
+  the bad velocity lasts many frames, not 1-2.
+- **0.5.8:** double reset and 2 camera-only frames, then for 90 frames per pixel: game
+  velocity more than 24 px away from camera motion is replaced by it. Logs each of the 40
+  frames after a reset (decoded vs camera, % inflated, % replaced, max motion).
 
 ### Crash report from a probe 0.3.1 session
 

@@ -14,6 +14,8 @@ cbuffer Constants : register(b0)
     float2 ViewSize;                     // render view rect, in pixels
     float2 InvViewSize;
     float4 Flags;                        // x: 1 = ignore the game's velocity (camera motion only)
+                                         // y: > 0 = use camera motion where the game's velocity
+                                         //    differs from it by more than y pixels (after cuts)
 };
 
 Texture2D<float4> Velocity : register(t0);  // RGBA16_UNORM, UE EncodeVelocityToTexture
@@ -27,7 +29,8 @@ RWTexture2D<float> OutDepth : register(u1);
 // 3 sum of |motion| x4 (capped at 4096 px), 4 max |motion| x16, 5 depth == 0 (sky),
 // 6 ~min depth bits (non-zero depths), 7 max depth bits. Over object-velocity pixels:
 // 8 sum of |decoded velocity| x16 px, 9 sum of |camera reprojection| x16 px (what the
-// pixel would move if it were static), 10 decoded > 4x camera + 1 px.
+// pixel would move if it were static), 10 decoded > 4x camera + 1 px, 11 rejected by
+// Flags.y (camera motion used instead).
 RWBuffer<uint> Stats : register(u2);
 
 float2 DecodeVelocity(float4 encoded)
@@ -57,7 +60,8 @@ void main(uint2 id : SV_DispatchThreadID)
     const float4 encoded = Velocity[id];
     const bool hasObject = encoded.x > 0.0;
     const float2 decoded = hasObject ? ToPixels(DecodeVelocity(encoded)) : float2(0.0, 0.0);
-    const float2 motion = (hasObject && Flags.x == 0.0) ? decoded : camera;
+    const bool stale = hasObject && Flags.y > 0.0 && length(decoded - camera) > Flags.y;
+    const float2 motion = (hasObject && Flags.x == 0.0 && !stale) ? decoded : camera;
 
     OutMotion[id] = motion;
     OutDepth[id] = deviceZ;
@@ -88,6 +92,8 @@ void main(uint2 id : SV_DispatchThreadID)
             InterlockedAdd(Stats[9], (uint)(cameraLength * 16.0));
             if (decodedLength > 4.0 * cameraLength + 1.0)
                 InterlockedAdd(Stats[10], 1);
+            if (stale)
+                InterlockedAdd(Stats[11], 1);
         }
     }
 }

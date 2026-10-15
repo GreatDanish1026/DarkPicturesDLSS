@@ -96,7 +96,11 @@ std::unordered_map<uint64_t, resource_view> g_srvs;  // game texture -> our SRV 
 
 std::string g_status = "waiting for the game's TAAU pass";
 uint64_t g_done = 0, g_failures = 0;
-constexpr uint32_t kCameraOnlyFrames = 4;  // after a reset, see Evaluate
+constexpr uint32_t kCameraOnlyFrames = 2;  // after a reset, see Evaluate
+constexpr uint32_t kStaleWindow = 90;
+constexpr float kStaleThreshold = 24.0f;  // render pixels
+constexpr uint32_t kResetLogFrames = 40;  // per-frame diagnostics after a reset
+uint32_t g_resetLogLines = 0;
 uint32_t g_framesSinceReset = 1000;
 
 void SetStatus(const char* fmt, ...) {
@@ -160,6 +164,7 @@ constexpr uint64_t kStatsLogEvery = 60;
 resource g_stats[kStatsRing] = {}, g_statsReadback[kStatsRing] = {}, g_statsZero = {};
 resource_view g_statsUav[kStatsRing] = {};
 bool g_statsPending[kStatsRing] = {};
+uint32_t g_statsAge[kStatsRing] = {};  // frames since the last reset, per slot
 uint64_t g_statsFrame = 0;
 uint64_t g_statsSum[kStatsWords] = {};  // totals since the last log line
 uint32_t g_statsMax = 0, g_statsDepthMin = 0xffffffffu, g_statsDepthMax = 0, g_statsFrames = 0;
@@ -207,6 +212,12 @@ void CollectStats(device* dev, uint32_t slot) {
     memcpy(s, p, sizeof(s));
     dev->unmap_buffer_region(g_statsReadback[slot]);
     g_statsPending[slot] = false;
+    // Frame by frame right after a reset: how long does the game's velocity stay wrong?
+    if (g_statsAge[slot] < kResetLogFrames && s[1] && ++g_resetLogLines <= 600)
+        LOG("dlss: reset+%u: object pixels %.0f%%, decoded %.2f px vs camera %.2f px, %.1f%% inflated, "
+            "%.1f%% replaced by camera motion, max motion %.1f px",
+            g_statsAge[slot], 100.0 * s[1] / (s[0] ? s[0] : 1), s[8] / 16.0 / s[1], s[9] / 16.0 / s[1],
+            100.0 * s[10] / s[1], 100.0 * s[11] / s[1], s[4] / 16.0);
     for (uint32_t i = 0; i < 4; ++i) g_statsSum[i] += s[i];
     g_statsSum[5] += s[5];
     for (uint32_t i = 8; i <= 10; ++i) g_statsSum[i] += s[i];
@@ -394,14 +405,17 @@ Result Evaluate(const Frame& f) {
     // A feature last used shots ago holds stale history: start it fresh.
     const bool switched = feature != g_lastFeature;
 
-    // After a cut the game's velocity buffer still describes the previous shot for a
-    // frame or two (measured: 34-43 px decoded vs 3 px camera motion, up to 298 px), and
-    // DLSS would reproject its fresh history with it. So reset on the cut frame and the
-    // next one, and use camera-only motion (ClipToPrevClip is right at a cut) for
-    // kCameraOnlyFrames frames.
+    // After a cut the game's velocity buffer is wrong for a while on many object pixels
+    // (measured over the ~60 frames after the "And scene." cut: 47 px decoded vs 4.6 px
+    // camera motion, up to 309 px), and DLSS reprojects its history with it. So: reset on
+    // the cut frame and the next one, camera-only motion (ClipToPrevClip is right at a cut)
+    // for kCameraOnlyFrames, then for kStaleWindow frames per pixel: game velocity that
+    // disagrees with camera motion by more than kStaleThreshold px is replaced by it.
     if (f.reset || switched) g_framesSinceReset = 0;
-    const bool reset = g_framesSinceReset <= 1;
-    const bool cameraOnly = g_options.ignoreVelocity || g_framesSinceReset < kCameraOnlyFrames;
+    const uint32_t age = g_framesSinceReset;
+    const bool reset = age <= 1;
+    const bool cameraOnly = g_options.ignoreVelocity || age < kCameraOnlyFrames;
+    const float staleThreshold = age < kStaleWindow ? kStaleThreshold : 0.0f;
     if (g_framesSinceReset < 1000) ++g_framesSinceReset;
 
     // Our textures match the game's render-target size; only the render rect is used.
@@ -424,7 +438,8 @@ Result Evaluate(const Frame& f) {
     constants[18] = 1.0f / float(f.renderW);
     constants[19] = 1.0f / float(f.renderH);
     constants[20] = cameraOnly ? 1.0f : 0.0f;
-    constants[21] = constants[22] = constants[23] = 0.0f;
+    constants[21] = staleThreshold;
+    constants[22] = constants[23] = 0.0f;
     // Diagnostics slot for this frame: read what it held kStatsRing frames ago, clear it.
     const uint32_t slot = static_cast<uint32_t>(g_statsFrame++ % kStatsRing);
     CollectStats(dev, slot);
@@ -446,6 +461,7 @@ Result Evaluate(const Frame& f) {
     cmd->copy_buffer_region(g_stats[slot], 0, g_statsReadback[slot], 0, kStatsWords * 4);
     cmd->barrier(g_stats[slot], resource_usage::copy_source, resource_usage::unordered_access);
     g_statsPending[slot] = true;
+    g_statsAge[slot] = age;
 
     const resource ours[2] = {g_motion, g_depth};
     const resource_usage uav[2] = {resource_usage::unordered_access, resource_usage::unordered_access};
