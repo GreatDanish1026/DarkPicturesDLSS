@@ -28,7 +28,9 @@ $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe
     Sort-Object FullName | Select-Object -Last 1 -ExpandProperty FullName
 if (-not $fxc) { throw "fxc.exe not found (Windows 10/11 SDK)." }
 & $fxc /nologo /T cs_5_0 /E main /O3 /Vn kDlssPrepareCS /Fh "$obj\dlss_prepare_cs.h" "$root\src\shaders\dlss_prepare.hlsl" | Out-Null
-if ($LASTEXITCODE) { throw "shader compile failed" }
+if ($LASTEXITCODE) { throw "shader compile failed: dlss_prepare.hlsl" }
+& $fxc /nologo /T cs_5_0 /E main /O3 /Vn kDlssClampCS /Fh "$obj\dlss_clamp_cs.h" "$root\src\shaders\dlss_clamp.hlsl" | Out-Null
+if ($LASTEXITCODE) { throw "shader compile failed: dlss_clamp.hlsl" }
 
 # ReShade add-on headers in third_party\reshade match ReShade 6.8.0; the DLSS SDK in third_party\dlss is 310.9.1.
 $cmd = @(

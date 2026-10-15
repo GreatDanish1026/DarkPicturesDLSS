@@ -22,6 +22,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "dlss_clamp_cs.h"    // kDlssClampCS, from shaders/dlss_clamp.hlsl
 #include "dlss_prepare_cs.h"  // kDlssPrepareCS, compiled by build.ps1 from shaders/dlss_prepare.hlsl
 
 #pragma comment(lib, "nvsdk_ngx_s.lib")
@@ -93,6 +94,20 @@ resource_view g_motionUav = {}, g_depthUav = {};
 uint32_t g_texW = 0, g_texH = 0;
 
 std::unordered_map<uint64_t, resource_view> g_srvs;  // game texture -> our SRV of it
+std::unordered_map<uint64_t, resource_view> g_uavs;  // game texture -> our UAV of it
+
+// Clamped copy of the DLSS output (g_hist), made right after DLSS in frame N and copied
+// over that same output texture (g_histOutput) just before the first pass of frame N+1
+// reads it, i.e. the game's SSGI/SSR. See dlss_clamp.hlsl.
+pipeline_layout g_clampLayout = {};
+pipeline g_clampPso = {};
+resource g_hist = {};
+resource_view g_histUav = {};
+uint32_t g_histW = 0, g_histH = 0;
+resource g_histOutput = {};    // the game texture DLSS wrote and g_hist mirrors
+uint64_t g_histFrame = 0;      // frame g_hist was made in
+uint64_t g_histPatchedFrame = 0;
+uint64_t g_histPatches = 0;
 
 std::string g_status = "waiting for the game's TAAU pass";
 uint64_t g_done = 0, g_failures = 0;
@@ -279,7 +294,66 @@ bool CreatePipeline(device* dev) {
         SetStatus("could not create the prepare pass pipeline");
         return false;
     }
+
+    // Clamp pass (dlss_clamp.hlsl): b0 constants, t0 input colour, u0 DLSS output, u1 ours.
+    pipeline_layout_param clampParams[3];
+    clampParams[0] = pipeline_layout_param(constant_range{0, 0, 0, 4, shader_stage::compute});
+    descriptor_range clampSrv = srvs;
+    clampSrv.count = 1;
+    descriptor_range clampUav = uavs;
+    clampUav.count = 2;
+    clampParams[1].type = pipeline_layout_param_type::push_descriptors_with_ranges;
+    clampParams[1].descriptor_table = {1, &clampSrv};
+    clampParams[2].type = pipeline_layout_param_type::push_descriptors_with_ranges;
+    clampParams[2].descriptor_table = {1, &clampUav};
+    shader_desc clampCs;
+    clampCs.code = kDlssClampCS;
+    clampCs.code_size = sizeof(kDlssClampCS);
+    pipeline_subobject clampSub = {pipeline_subobject_type::compute_shader, 1, &clampCs};
+    if (!dev->create_pipeline_layout(3, clampParams, &g_clampLayout) ||
+        !dev->create_pipeline(g_clampLayout, 1, &clampSub, &g_clampPso)) {
+        SetStatus("could not create the history clamp pipeline");
+        return false;
+    }
     return CreateStats(dev);
+}
+
+// ---- clamped lighting history (see dlss_clamp.hlsl) --------------------------------
+
+void DestroyHistory(device* dev) {
+    if (g_histUav.handle) dev->destroy_resource_view(g_histUav);
+    if (g_hist.handle) dev->destroy_resource(g_hist);
+    g_histUav = {};
+    g_hist = {};
+    g_histW = g_histH = 0;
+    g_histOutput = {};
+}
+
+bool EnsureHistory(device* dev, uint32_t w, uint32_t h) {
+    if (g_hist.handle && g_histW == w && g_histH == h) return true;
+    DestroyHistory(dev);
+    const resource_desc desc(w, h, 1, 1, format::r16g16b16a16_float, 1, memory_heap::default_,
+                             resource_usage::shader_resource | resource_usage::unordered_access |
+                                 resource_usage::copy_source);
+    if (!dev->create_resource(desc, nullptr, resource_usage::unordered_access, &g_hist) ||
+        !dev->create_resource_view(g_hist, resource_usage::unordered_access,
+                                   resource_view_desc(format::r16g16b16a16_float), &g_histUav)) {
+        DestroyHistory(dev);
+        return false;
+    }
+    g_histW = w;
+    g_histH = h;
+    LOG("dlss: clamped lighting history texture %ux%u", w, h);
+    return true;
+}
+
+resource_view GameUav(device* dev, resource res, format fmt) {
+    auto it = g_uavs.find(res.handle);
+    if (it != g_uavs.end()) return it->second;
+    resource_view view = {};
+    if (!dev->create_resource_view(res, resource_usage::unordered_access, resource_view_desc(fmt), &view)) return {};
+    g_uavs[res.handle] = view;
+    return view;
 }
 
 void DestroyTextures(device* dev) {
@@ -497,10 +571,56 @@ Result Evaluate(const Frame& f) {
     g_lastEvalFrame = f.frame;
     g_lastFeature = feature;
     SetStatus("running: %ux%u -> %ux%u", f.renderW, f.renderH, f.outW, f.outH);
+
+    // 3. Clamped copy of the DLSS output for next frame's SSGI/SSR (PatchLightingHistory).
+    g_histOutput = {};
+    if (g_options.clampLightingHistory && f.outX == 0 && f.outY == 0) {
+        const resource_desc outDesc = dev->get_resource_desc(f.output);
+        const resource_view colorSrv = GameSrv(dev, f.color, format::r16g16b16a16_float);
+        const resource_view outUav = GameUav(dev, f.output, format::r16g16b16a16_float);
+        if (outDesc.texture.format == format::r16g16b16a16_float && colorSrv.handle && outUav.handle &&
+            EnsureHistory(dev, outDesc.texture.width, outDesc.texture.height)) {
+            cmd->barrier(f.output, resource_usage::unordered_access, resource_usage::unordered_access);  // DLSS done
+            const float clampConstants[4] = {float(f.outW), float(f.outH), float(f.renderW), float(f.renderH)};
+            cmd->bind_pipeline(pipeline_stage::compute_shader, g_clampPso);
+            cmd->push_constants(shader_stage::compute, g_clampLayout, 0, 0, 4, clampConstants);
+            cmd->push_descriptors(shader_stage::compute, g_clampLayout, 1,
+                                  descriptor_table_update{{}, 0, 0, 1, descriptor_type::shader_resource_view, &colorSrv});
+            const resource_view clampUavs[2] = {outUav, g_histUav};
+            cmd->push_descriptors(shader_stage::compute, g_clampLayout, 2,
+                                  descriptor_table_update{{}, 0, 0, 2, descriptor_type::unordered_access_view, clampUavs});
+            cmd->dispatch((f.outW + 7) / 8, (f.outH + 7) / 8, 1);
+            g_histOutput = f.output;
+            g_histFrame = f.frame;
+        }
+    }
     return Result::done;
 }
 
+bool PatchLightingHistory(command_list* cmd, resource texture, bool compute, uint64_t frame) {
+    if (!g_histOutput.handle || texture.handle != g_histOutput.handle || frame != g_histFrame + 1 ||
+        g_histPatchedFrame == frame)
+        return false;
+    g_histPatchedFrame = frame;
+    // The reader has the texture in SRV state for its stage; copy our clamped version over it.
+    const resource_usage reading = compute ? resource_usage::shader_resource_non_pixel
+                                           : resource_usage::shader_resource_pixel;
+    const resource both[2] = {g_hist, texture};
+    const resource_usage before[2] = {resource_usage::unordered_access, reading};
+    const resource_usage copying[2] = {resource_usage::copy_source, resource_usage::copy_dest};
+    cmd->barrier(2, both, before, copying);
+    cmd->copy_resource(g_hist, texture);
+    cmd->barrier(2, both, copying, before);
+    if (++g_histPatches == 1) LOG("dlss: first clamped lighting history copy (frame %llu)", static_cast<unsigned long long>(frame));
+    return true;
+}
+
 void OnDestroyResource(resource r) {
+    if (r.handle == g_histOutput.handle) g_histOutput = {};
+    if (auto it = g_uavs.find(r.handle); it != g_uavs.end()) {
+        if (g_device) g_device->destroy_resource_view(it->second);
+        g_uavs.erase(it);
+    }
     auto it = g_srvs.find(r.handle);
     if (it == g_srvs.end()) return;
     if (g_device) g_device->destroy_resource_view(it->second);
@@ -517,6 +637,13 @@ void Shutdown(device* dev) {
     g_params = nullptr;
     for (auto& [res, view] : g_srvs) dev->destroy_resource_view(view);
     g_srvs.clear();
+    for (auto& [res, view] : g_uavs) dev->destroy_resource_view(view);
+    g_uavs.clear();
+    DestroyHistory(dev);
+    if (g_clampPso.handle) dev->destroy_pipeline(g_clampPso);
+    if (g_clampLayout.handle) dev->destroy_pipeline_layout(g_clampLayout);
+    g_clampPso = {};
+    g_clampLayout = {};
     DestroyTextures(dev);
     DestroyStats(dev);
     if (g_pso.handle) dev->destroy_pipeline(g_pso);
@@ -538,5 +665,6 @@ std::string Status() {
 }
 
 uint64_t FramesDone() { return g_done; }
+uint64_t LightingHistoryPatches() { return g_histPatches; }
 
 }  // namespace dlss

@@ -292,6 +292,13 @@ Frame dump 1705 (0.5.10, kick close-up, 85 frames after a reset that reached DLS
   run of an intermittent problem, so it's strong evidence for the feedback-loop cause
   but not yet proof. Options: turn SSGI/SSR off under DLSS, or break the loop by giving
   the lighting a clamped copy of the DLSS output.
+- **0.5.12 keeps SSGI/SSR and breaks the loop:** right after DLSS, `dlss_clamp.hlsl`
+  writes a copy of the DLSS output clamped to the 3x3 min/max of the current input
+  colour (render pixels), the same idea as UE's TAA history clamp. In the next frame,
+  just before the first pass that reads last frame's DLSS output (detected generically
+  from the mirrored bindings, normally #82), that copy is copied over the texture, with
+  SRV -> copy_dest -> SRV barriers for the reader's stage. The displayed image stays
+  unclamped. Overlay: "Clamp lighting history" (on by default) with a copy counter.
 
 ### Crash report from a probe 0.3.1 session
 

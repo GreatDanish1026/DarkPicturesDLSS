@@ -36,6 +36,7 @@ struct Options {
     bool mvJittered = false;  // DLSS feature flag; changing it recreates the feature
     bool invertMotion = false;  // DLSS MV scale -1: tests the motion vector sign
     bool ignoreVelocity = false;  // camera reprojection only: tests the game velocity decode
+    bool clampLightingHistory = true;  // give SSGI/SSR a clamped copy of the DLSS output
 };
 extern Options g_options;
 
@@ -45,6 +46,10 @@ void Tick(effect_runtime* runtime);
 // At a TAAU dispatch: records DLSS only if a feature for exactly these sizes exists;
 // otherwise asks Tick for one and returns skipped without touching the command list.
 Result Evaluate(const Frame& f);
+// Before a pass that reads <texture>: if it's last frame's DLSS output (read back by the
+// game's SSGI/SSR), copy the clamped version over it first. Once per frame.
+bool PatchLightingHistory(command_list* cmd, resource texture, bool compute, uint64_t frame);
+uint64_t LightingHistoryPatches();
 void OnDestroyResource(resource r);  // drops cached views of game textures
 void Shutdown(device* dev);
 
