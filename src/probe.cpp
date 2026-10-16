@@ -745,7 +745,6 @@ void OnInitDevice(device* dev) {
 void OnInitSwapchain(swapchain* sc, bool resize) {
     std::lock_guard lock(g_mutex);
     Log("swap chain %s (%s)", resize ? "resized" : "created", ApiName(sc->get_device()->get_api()));
-    fg::OnInitSwapchain(sc, resize);
 }
 
 void UpdateSwapchainInfo(effect_runtime* rt) {
@@ -1530,7 +1529,7 @@ void OnReshadePresent(effect_runtime* rt) {
     UpdateSwapchainInfo(rt);
     ApplyRenderScale();
     ApplyOverrides();
-    fg::Tick();
+    fg::g_options.verboseLog = dlss::g_options.verboseLog;
     dlss::Tick(rt);
     if (g_debugHotkeys && rt->is_key_down(VK_CONTROL)) {
         if (rt->is_key_pressed(VK_F9)) RequestDump();  // not F11: UE toggles fullscreen on it
@@ -1655,39 +1654,32 @@ void DrawDiagnostics() {
         ImGui::Text("D3D12: %zu root signatures, %zu heaps, %llu descriptor writes, %llu copied, %zu mapped buffers",
                     g_layouts.size(), g_heaps.size(), static_cast<unsigned long long>(g_descriptorWrites),
                     static_cast<unsigned long long>(g_descriptorCopies), g_mapped.size());
+    ImGui::Separator();
+    ImGui::Text("Frame generation: %s", fg::Status().c_str());
+    ImGui::TextWrapped("Pacing: %s", fg::Pacing().c_str());
+    if (ImGui::Checkbox("Streamline copies motion vectors and depth when tagged", &fg::g_options.copyTags))
+        fg::SaveSettings();
     ImGui::TextUnformatted("Log: QuarryDLSS.log next to the game executable.");
 }
 
-// DLSS-G through Streamline (fg.cpp): off unless a hook is chosen; the hook needs a restart.
+// Frame generation (fg.cpp), next to the DLSS choices: it needs DLSS Super Resolution running.
 void DrawFrameGeneration() {
     auto& o = fg::g_options;
-    static const char* hooks[] = {"Off", "Factory hook (recommended)", "Swap chain upgrade (untested)"};
-    int hook = static_cast<int>(o.hook);
-    bool changed = false;
-    if (ImGui::Combo("Streamline hook (restart the game)", &hook, hooks, 3)) {
-        o.hook = static_cast<fg::Hook>(hook);
-        changed = true;
-    }
-    ImGui::TextWrapped("Needs sl.interposer.dll, sl.common.dll, sl.dlss_g.dll, sl.reflex.dll, sl.pcl.dll and "
-                       "nvngx_dlssg.dll next to the game exe, and hardware-accelerated GPU scheduling.");
     const char* modes[static_cast<int>(fg::Mode::count)];
     for (int i = 0; i < static_cast<int>(fg::Mode::count); ++i) modes[i] = fg::ModeName(static_cast<fg::Mode>(i));
     int mode = static_cast<int>(o.mode);
-    if (ImGui::Combo("Frame generation", &mode, modes, static_cast<int>(fg::Mode::count))) {
-        o.mode = static_cast<fg::Mode>(mode);
-        changed = true;
-    }
-    ImGui::TextWrapped("2x, 3x, 4x: each rendered frame plus 1-3 generated ones. Dynamic: Streamline picks the "
-                       "multiplier to reach your refresh rate. The frame generation model is the driver's (or the "
-                       "NVIDIA App override's); DLSS-G has no presets to pick.");
-    changed |= ImGui::Checkbox("Reflex low latency", &o.reflex);
-    changed |= ImGui::Checkbox("Streamline copies motion/depth when tagged", &o.copyTags);
-    ImGui::TextWrapped("Status: %s", fg::Status().c_str());
-    ImGui::TextWrapped("Pacing: %s", fg::Pacing().c_str());
+    ImGui::BeginDisabled(!fg::Selectable() || !dlss::g_options.enabled);
+    const bool changed = ImGui::Combo("Frame generation", &mode, modes, static_cast<int>(fg::Mode::count));
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("DLSS Frame Generation. 2x, 3x, 4x: each rendered frame plus 1-3 generated ones.\n"
+                          "Dynamic: picks the multiplier that reaches your refresh rate.");
+    if (!dlss::g_options.enabled && o.mode != fg::Mode::off)
+        ImGui::TextWrapped("Paused: needs DLSS Super Resolution on.");
+    else if (const std::string st = fg::FriendlyStatus(); !st.empty())
+        ImGui::TextWrapped("%s", st.c_str());
     if (changed) {
-        Log("frame generation options at frame %llu: hook %d, mode %s, reflex %d, copy tags %d",
-            static_cast<unsigned long long>(g_frame), static_cast<int>(o.hook), fg::ModeName(o.mode), o.reflex,
-            o.copyTags);
+        o.mode = static_cast<fg::Mode>(mode);
+        Log("options at frame %llu: frame generation %s", static_cast<unsigned long long>(g_frame), fg::ModeName(o.mode));
         fg::SaveSettings();
     }
 }
@@ -1702,6 +1694,8 @@ void DrawOverlay(effect_runtime*) {
     for (int i = 0; i <= kCustomQuality; ++i) names[i] = kQualityModes[i].name;
     if (ImGui::Combo("Quality mode", &g_quality, names, kCustomQuality + 1) && g_quality != kCustomQuality)
         g_forcePercentage = kQualityModes[g_quality].percentage;
+    ImGui::Spacing();
+    DrawFrameGeneration();
 
     if (ImGui::CollapsingHeader("Advanced")) {
         static const char* presetNames[] = {"J (recommended)", "K", "L", "M", "E (older CNN model)", "Driver default"};
@@ -1716,7 +1710,6 @@ void DrawOverlay(effect_runtime*) {
             g_quality = kCustomQuality;
         ImGui::Checkbox("Stabilise screen-space lighting (SSGI/SSR mods)", &o.clampLightingHistory);
     }
-    if (ImGui::CollapsingHeader("Frame generation (experiment)")) DrawFrameGeneration();
     if (ImGui::CollapsingHeader("Diagnostics")) DrawDiagnostics();
 
     // Save settings, and record option changes so a test run can be read back from the log.

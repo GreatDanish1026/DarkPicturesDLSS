@@ -1,5 +1,5 @@
-// DLSS Frame Generation (DLSS-G through NVIDIA Streamline) experiment, off by default.
-// See fg.cpp and docs/FINDINGS.md, "Frame Generation spike".
+// DLSS Frame Generation (DLSS-G through NVIDIA Streamline). Off by default. See fg.cpp and
+// docs/FINDINGS.md, "Frame Generation spike".
 #pragma once
 
 #include <reshade.hpp>
@@ -12,22 +12,12 @@ struct ID3D12Resource;
 
 namespace fg {
 
-// How Streamline's swap chain proxy is put in the game's present path. Read from
-// ReShade.ini at load: a change needs a game restart.
-enum class Hook : int {
-    off = 0,
-    factory = 1,  // swap chain creation goes through an SL factory proxy; ReShade makes that call,
-                  // so game -> ReShade -> SL -> DXGI (works, FINDINGS.md run 2)
-    upgrade = 2,  // slUpgradeInterface on the finished swap chain, ReShade's calls redirected to it
-                  // (game -> ReShade -> SL -> DXGI); needs a swap chain resize to take the buffers over
-};
-
 // What DLSS-G presents per rendered frame. DLSS-G has no model presets to choose
 // (Streamline only has them for Super Resolution and Ray Reconstruction); its model
 // comes from the driver or the NVIDIA App override.
 enum class Mode : int {
-    off = 0,   // DLSSGMode::eOff (Streamline stays loaded)
-    x2,        // eOn, 1 generated frame
+    off = 0,   // Streamline isn't loaded if this is the setting at launch
+    x2,        // DLSSGMode::eOn, 1 generated frame
     x3,        // eOn, 2
     x4,        // eOn, 3 (capped by numFramesToGenerateMax)
     dynamic,   // eDynamic: Streamline picks the multiplier to reach the refresh rate
@@ -36,10 +26,9 @@ enum class Mode : int {
 const char* ModeName(Mode m);  // "Off", "2x", ... (also the ReShade.ini value)
 
 struct Options {
-    Hook hook = Hook::off;
-    Mode mode = Mode::x2;
-    bool reflex = true;              // Reflex low latency (DLSS-G refuses to run without it)
-    bool copyTags = true;            // eOnlyValidNow (SL copies motion/depth when tagged), else eValidUntilPresent
+    Mode mode = Mode::off;
+    bool copyTags = true;    // eOnlyValidNow (SL copies motion/depth when tagged), else eValidUntilPresent
+    bool verboseLog = false; // Streamline's info lines and the 2 s pacing lines (set by the probe)
 };
 extern Options g_options;
 
@@ -63,17 +52,19 @@ struct FrameInputs {
 
 void LoadSettings();
 void SaveSettings();
-void OnInitDevice(reshade::api::device* dev);   // remembers the device; installs the factory hook
-void OnInitSwapchain(reshade::api::swapchain* sc, bool resize);
-void Tick();                                    // every ReShade present (the upgrade hook happens here)
-// Called by the probe's present event: false for the frames DLSS-G generated, which
-// ReShade also sees with the factory hook. The probe counts frames on true only.
+// Installs the swap chain creation hook if frame generation is on at launch and the
+// Streamline files are next to the game exe.
+void OnInitDevice(reshade::api::device* dev);
+// Called by the probe's present event: false for frames DLSS-G generated, in case ReShade
+// ever sees them (only if the game created its swap chain without going through ReShade).
 bool IsRealPresent();
-void TagFrame(const FrameInputs& in);           // after DLSS SR, on the game's command list
-void Shutdown();                                // restores every patched vtable entry
+void TagFrame(const FrameInputs& in);  // after DLSS SR, on the game's command list
+void Shutdown();                       // restores every patched vtable entry
 
-std::string Status();          // one line for the overlay
-std::string Pacing();          // last measured window
+bool Selectable();             // the overlay may offer the modes (files present, nothing failed)
+std::string FriendlyStatus();  // one plain line for the overlay's main panel
+std::string Status();          // technical status, for Diagnostics
+std::string Pacing();          // last measured 2 s window, for Diagnostics
 bool Loaded();                 // Streamline initialised
 
 extern void (*g_log)(const char* fmt, ...);

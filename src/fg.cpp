@@ -1,27 +1,20 @@
-// DLSS Frame Generation (DLSS-G) through NVIDIA Streamline: a feasibility experiment.
+// DLSS Frame Generation (DLSS-G) through NVIDIA Streamline.
 //
-// Streamline is used in manual hooking mode (sl.interposer.dll loaded at run time, never
+// Streamline runs in manual hooking mode (sl.interposer.dll loaded at run time, never
 // linked), because the game's D3D12 device and swap chain already come through ReShade.
-// DLSS-G needs its proxy swap chain in the present path, which can be put there two ways
-// (Options::hook, from ReShade.ini, restart to change):
-//
-//   factory  The IDXGIFactory vtable (shared by every DXGI factory) is patched so that the
-//            swap chain creation goes through an SL factory proxy. ReShade wraps the game's
-//            factory and calls the real one, so the call arrives from ReShade (first test
-//            run) and SL ends up below it: game -> ReShade -> SL -> DXGI. DLSS-G sees the
-//            swap chain created, as it expects. If the call came straight from the game
-//            instead, SL would wrap ReShade's swap chain and ReShade would see generated
-//            frames too (IsRealPresent tells the probe which are real).
-//   upgrade  slUpgradeInterface on the finished swap chain, and the native swap chain's
-//            vtable is patched so that ReShade's calls go to the SL proxy:
-//            game -> ReShade -> SL -> DXGI. DLSS-G never saw the swap chain created, and the
-//            game and ReShade already hold the real back buffers, so it can only take over
-//            after a swap chain resize, if at all.
+// DLSS-G needs its proxy swap chain in the present path and expects to see that swap chain
+// being created. So when frame generation is on at launch, the IDXGIFactory vtable (shared by
+// every DXGI factory) is patched and the swap chain creation goes through an SL factory
+// proxy. ReShade wraps the game's factory and calls the real one, so the call arrives from
+// ReShade and Streamline ends up below it: game -> ReShade -> Streamline -> DXGI. ReShade
+// then sees real frames only, and its overlay is interpolated with the game.
 //
 // Per frame: at the TAAU dispatch, after DLSS Super Resolution, TagFrame gives Streamline
 // our motion vectors and depth (the same ones DLSS SR gets) and the camera constants from
-// the View uniform buffer. Reflex/PCL markers are placed around the game's Present, and the
-// Reflex sleep right after it, since there is no hook into the game's simulation loop.
+// the View uniform buffer. At the game's Present: DLSS-G is paused for frames DLSS SR didn't
+// tag (DLSS off, loading screens, camera-cut frames) and around swap chain resizes; PCL
+// markers go around the Present and the Reflex sleep right after it, since there is no hook
+// into the game's simulation loop.
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -41,6 +34,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 namespace fg {
@@ -58,6 +52,11 @@ namespace {
 constexpr char kSection[] = "QuarryDLSS";
 // Same id as the NGX project id in dlss.cpp.
 constexpr char kProjectId[] = "6c2f3b1e-9d4a-4e57-8b6f-2a1d7c9e0f53";
+// The Streamline runtime the user copies next to the game exe (build.ps1 -InstallStreamline).
+const wchar_t* const kFiles[] = {L"sl.interposer.dll", L"sl.common.dll", L"sl.dlss_g.dll",
+                                 L"sl.reflex.dll",     L"sl.pcl.dll",    L"nvngx_dlssg.dll"};
+constexpr uint32_t kPauseLogFrames = 30;  // untagged frames in a row before a pause is logged / shown
+constexpr uint32_t kResizeFrames = 3;     // presents DLSS-G stays off after a resize
 
 const sl::ViewportHandle& Viewport() {
     static const sl::ViewportHandle v(0u);
@@ -96,8 +95,8 @@ std::string Caller(const void* ret) {
     return ModuleName(ModuleOf(ret));
 }
 
-// Set while we call into an SL proxy, so its calls back into the patched native
-// functions on this thread go straight through.
+// Set while we call into the SL factory proxy, so its call back into the patched native
+// function on this thread goes straight through.
 thread_local bool t_inside = false;
 struct Inside {
     Inside() { t_inside = true; }
@@ -167,23 +166,34 @@ Sl g_sl;
 
 enum class State { untried, ok, failed };
 State g_state = State::untried;
-std::string g_status = "off";
+bool g_filesPresent = false;  // all of kFiles next to the exe (checked at load)
+bool g_hooked = false;        // the factory hook is in place (frame generation was on at launch)
 ID3D12Device* g_device = nullptr;  // native: the last D3D12 device created (the game's real one by swap chain time)
 LUID g_luid = {};
 
-std::mutex g_mutex;                   // g_token, g_optionsDirty, statistics
+std::mutex g_mutex;                   // the fields below that TagFrame and the present path share
 sl::FrameToken* g_token = nullptr;    // the frame being built (tagged at the TAAU, presented next)
+uint32_t g_taggedFrame = UINT32_MAX;  // frame index TagFrame last tagged
 bool g_optionsDirty = true;
+uint32_t g_resizeFrames = 0;          // presents left with DLSS-G off after a resize
+
+// Present thread only.
+Mode g_applied = Mode::count;         // what DLSS-G was last set to (count: nothing yet)
+bool g_reflexApplied = false;
+bool g_dynamicSupported = false;
 uint32_t g_maxFrames = 1;             // DLSSGState::numFramesToGenerateMax
 uint32_t g_dlssgStatus = 0xffffffffu;
+uint32_t g_untagged = 0;              // untagged frames in a row
 std::atomic<uint64_t> g_realPresents{0};
-uint64_t g_countedPresents = 0;       // real presents the probe has counted (factory hook)
+uint64_t g_countedPresents = 0;       // real presents the probe has counted
 // The game's CreateSwapChain reached us through ReShade (ReShade wraps the game's factory
 // and calls the real one): Streamline then sits below ReShade, which sees real frames only.
 bool g_reshadeAbove = false;
 uint32_t g_errors = 0;                // logged SL call failures, capped
 
-std::mutex g_statusMutex;  // g_status: set on the game's threads, read by the overlay
+std::mutex g_statusMutex;  // g_status / g_friendly: set on the game's threads, read by the overlay
+std::string g_status = "off";
+std::string g_running;     // "3x, 52 -> 156 fps" from the last window
 
 void SetStatus(const char* fmt, ...) {
     char buf[256];
@@ -202,10 +212,29 @@ bool Check(sl::Result r, const char* what) {
     return false;
 }
 
+// Streamline's own log lines. Info only with Verbose log; a warning or error that repeats
+// (one per frame, say) is logged 3 times, then every 1000th time.
 void OnSlLog(sl::LogType type, const char* msg) {
+    if (type == sl::LogType::eInfo && !g_options.verboseLog) return;
     std::string m = msg ? msg : "";
     while (!m.empty() && (m.back() == '\n' || m.back() == '\r')) m.pop_back();
-    LOG("sl %s: %s", type == sl::LogType::eError ? "error" : type == sl::LogType::eWarn ? "warn" : "info", m.c_str());
+    const char* kind = type == sl::LogType::eError ? "error" : type == sl::LogType::eWarn ? "warn" : "info";
+    if (type != sl::LogType::eInfo) {
+        // "[time][streamline][warn][tid][elapsed]file.cpp:line[func] text": key on what follows the 5th ']'.
+        size_t at = 0;
+        for (int i = 0; i < 5 && at != std::string::npos; ++i) at = m.find(']', at ? at + 1 : 0);
+        const std::string key = at == std::string::npos ? m : m.substr(at + 1);
+        static std::mutex mutex;
+        static std::unordered_map<std::string, uint32_t> seen;
+        std::lock_guard lock(mutex);
+        const uint32_t n = seen.size() < 500 ? ++seen[key] : 1;
+        if (n > 3 && n % 1000 != 0) return;
+        if (n > 3) {
+            LOG("sl %s (seen %u times): %s", kind, n, m.c_str());
+            return;
+        }
+    }
+    LOG("sl %s: %s", kind, m.c_str());
 }
 
 template <class T>
@@ -227,10 +256,6 @@ bool EnsureSl() {
     }
     static const std::wstring dir = GameDir();
     const std::wstring path = dir + L"sl.interposer.dll";
-    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        SetStatus("sl.interposer.dll not found next to the game exe");
-        return false;
-    }
     if (!sl::security::verifyEmbeddedSignature(path.c_str())) {
         SetStatus("sl.interposer.dll is not signed by NVIDIA, not loaded");
         return false;
@@ -267,7 +292,7 @@ bool EnsureSl() {
     pref.pathsToPlugins = pluginPaths;
     pref.numPathsToPlugins = 1;
     pref.logMessageCallback = &OnSlLog;
-    // No OTA downloads: only the DLLs the user put next to the exe.
+    // No OTA downloads. (An NVIDIA App DLSS override still swaps in its own plugins.)
     pref.flags = sl::PreferenceFlags::eUseManualHooking | sl::PreferenceFlags::eUseFrameBasedResourceTagging |
                  sl::PreferenceFlags::eDisableCLStateTracking;
     pref.featuresToLoad = features;
@@ -295,6 +320,10 @@ bool EnsureSl() {
         g_sl.version(f, v);
         LOG("fg: %s: loaded %d, supported: %s, SL %s, NGX %s", sl::getFeatureAsStr(f), loaded ? 1 : 0,
             sl::getResultAsStr(supported), v.versionSL.toStr().c_str(), v.versionNGX.toStr().c_str());
+        if (f == sl::kFeatureDLSS_G && (!loaded || supported != sl::Result::eOk)) {
+            SetStatus("DLSS Frame Generation is not supported here (%s)", sl::getResultAsStr(supported));
+            return false;
+        }
     }
     sl::FeatureRequirements req;
     if (Check(g_sl.requirements(sl::kFeatureDLSS_G, req), "slGetFeatureRequirements(DLSS-G)"))
@@ -310,7 +339,7 @@ bool EnsureSl() {
         !GetFeatureFunction(sl::kFeatureReflex, "slReflexSetOptions", g_sl.reflexSetOptions) ||
         !GetFeatureFunction(sl::kFeatureReflex, "slReflexSleep", g_sl.reflexSleep) ||
         !GetFeatureFunction(sl::kFeaturePCL, "slPCLSetMarker", g_sl.pclSetMarker)) {
-        SetStatus("a DLSS-G / Reflex / PCL function is missing (are sl.dlss_g, sl.reflex, sl.pcl next to the exe?)");
+        SetStatus("a DLSS-G / Reflex / PCL function is missing (see log)");
         return false;
     }
     if (!Check(g_sl.newFrameToken(g_token, nullptr), "slGetNewFrameToken") || !g_token) {
@@ -322,23 +351,25 @@ bool EnsureSl() {
     return true;
 }
 
-// Present thread only (Streamline asks for options to be set where Present is called).
-void ApplyOptions() {
-    sl::ReflexOptions reflex;
-    reflex.mode = g_options.reflex ? sl::ReflexMode::eLowLatency : sl::ReflexMode::eOff;
-    Check(g_sl.reflexSetOptions(reflex), "slReflexSetOptions");
-    sl::DLSSGState state;
-    bool dynamicSupported = false;
-    if (Check(g_sl.dlssgGetState(Viewport(), state, nullptr), "slDLSSGGetState")) {
-        g_maxFrames = std::max(1u, state.numFramesToGenerateMax);
-        dynamicSupported = state.bIsDynamicMFGSupported == sl::Boolean::eTrue;
+// Sets DLSS-G (and Reflex, which DLSS-G requires) to <mode>. Present thread, except for the
+// resize case, where it has to happen before the resize.
+void ApplyMode(Mode mode, const char* why) {
+    const bool reflex = g_options.mode != Mode::off;
+    if (reflex != g_reflexApplied || g_applied == Mode::count) {
+        sl::ReflexOptions o;
+        o.mode = reflex ? sl::ReflexMode::eLowLatency : sl::ReflexMode::eOff;
+        if (Check(g_sl.reflexSetOptions(o), "slReflexSetOptions")) g_reflexApplied = reflex;
     }
-    Mode mode = g_options.mode;
-    if (mode == Mode::dynamic && !dynamicSupported) {
-        LOG("fg: dynamic frame generation is not supported here (needs multi-frame generation and driver 595.41+), "
-            "using 2x");
-        mode = Mode::x2;
+    if (g_applied == Mode::count) {
+        sl::DLSSGState state;
+        if (Check(g_sl.dlssgGetState(Viewport(), state, nullptr), "slDLSSGGetState")) {
+            g_maxFrames = std::max(1u, state.numFramesToGenerateMax);
+            g_dynamicSupported = state.bIsDynamicMFGSupported == sl::Boolean::eTrue;
+            LOG("fg: up to %u generated frames per rendered frame, dynamic mode %s", g_maxFrames,
+                g_dynamicSupported ? "supported" : "not supported (needs multi-frame generation and driver 595.41+)");
+        }
     }
+    if (mode == Mode::dynamic && !g_dynamicSupported) mode = Mode::x2;
     sl::DLSSGOptions o;
     o.mode = mode == Mode::off       ? sl::DLSSGMode::eOff
              : mode == Mode::dynamic ? sl::DLSSGMode::eDynamic
@@ -346,21 +377,20 @@ void ApplyOptions() {
     const uint32_t frames = mode == Mode::x4 ? 3u : mode == Mode::x3 ? 2u : 1u;  // ignored in dynamic mode
     o.numFramesToGenerate = std::clamp(frames, 1u, g_maxFrames);
     o.dynamicTargetFrameRate = 0.0f;  // the display's refresh rate
-    // Off is a live toggle here: keep the memory so turning it back on doesn't stutter.
+    // Pauses (DLSS SR not running, cuts, resizes) toggle Off often: keep the memory, no stutter.
     o.flags = sl::DLSSGFlags::eRetainResourcesWhenOff;
-    if (Check(g_sl.dlssgSetOptions(Viewport(), o), "slDLSSGSetOptions"))
-        LOG("fg: DLSS-G %s (%u generated per rendered frame unless off/dynamic, max %u, dynamic %s), Reflex %s",
-            ModeName(mode), o.numFramesToGenerate, g_maxFrames, dynamicSupported ? "supported" : "not supported",
-            g_options.reflex ? "low latency" : "off");
-    if (mode != g_options.mode) SetStatus("dynamic frame generation is not supported here, using 2x");
+    if (!Check(g_sl.dlssgSetOptions(Viewport(), o), "slDLSSGSetOptions")) return;
+    // Choices and long pauses are logged by the caller; brief pauses (cut frames) aren't.
+    if (why) LOG("fg: DLSS-G %s (%s)", ModeName(mode), why);
+    g_applied = mode;
 }
 
 void Marker(sl::PCLMarker m, const sl::FrameToken& t) { Check(g_sl.pclSetMarker(m, t), sl::getPCLMarkerAsStr(m)); }
 
 // ---- frame pacing ------------------------------------------------------------------------
-// Intervals between the game's Present calls (real frames) and between the presents that
-// reach DXGI or ReShade below Streamline (real + generated). CPU timestamps, so this shows
-// the pacing Streamline submits, not what the display shows (use FrameView for that).
+// Intervals between the game's Present calls (real frames) and, if ReShade is below
+// Streamline, between all presented frames. CPU timestamps: the pacing Streamline submits,
+// not what the display shows (use FrameView for that).
 
 struct Window {
     LARGE_INTEGER last = {};
@@ -370,6 +400,7 @@ Window g_real, g_shown;
 LARGE_INTEGER g_windowStart = {};
 uint64_t g_presentedBySl = 0;  // sum of DLSSGState::numFramesActuallyPresented in this window
 uint32_t g_taggedFrames = 0;   // TagFrame calls in this window
+uint32_t g_pausedFrames = 0;   // presents with DLSS-G paused in this window
 std::string g_pacing = "no data yet";
 
 double Ms(LARGE_INTEGER a, LARGE_INTEGER b) {
@@ -398,25 +429,22 @@ std::string Summary(std::vector<float>& v, double seconds) {
     return buf;
 }
 
-// Every ~2 s on the present thread: DLSS-G state and the pacing of the last window.
+// Every present (present thread): DLSS-G state, and every ~2 s the pacing of the last window.
 void PollState() {
     sl::DLSSGState state;
     if (Check(g_sl.dlssgGetState(Viewport(), state, nullptr), "slDLSSGGetState")) {
         g_presentedBySl += state.numFramesActuallyPresented;
-        g_maxFrames = std::max(1u, state.numFramesToGenerateMax);
         if (uint32_t(state.status) != g_dlssgStatus) {
             g_dlssgStatus = uint32_t(state.status);
             const auto s = state.status;
-            LOG("fg: DLSS-G status 0x%x%s%s%s%s%s (min size %u, max generated %u, VRAM %llu MB)", g_dlssgStatus,
+            LOG("fg: DLSS-G status 0x%x%s%s%s%s%s%s (min size %u, max generated %u)", g_dlssgStatus,
                 g_dlssgStatus == 0 ? " ok" : "",
                 (s & sl::DLSSGStatus::eFailResolutionTooLow) ? " resolution-too-low" : "",
                 (s & sl::DLSSGStatus::eFailReflexNotDetectedAtRuntime) ? " reflex-not-detected" : "",
                 (s & sl::DLSSGStatus::eFailHDRFormatNotSupported) ? " hdr-format-not-supported" : "",
                 (s & sl::DLSSGStatus::eFailCommonConstantsInvalid) ? " constants-invalid" : "",
-                state.minWidthOrHeight, state.numFramesToGenerateMax,
-                static_cast<unsigned long long>(state.estimatedVRAMUsageInBytes >> 20));
-            if (s & sl::DLSSGStatus::eFailGetCurrentBackBufferIndexNotCalled)
-                LOG("fg: DLSS-G: GetCurrentBackBufferIndex was not called on the SL swap chain");
+                (s & sl::DLSSGStatus::eFailGetCurrentBackBufferIndexNotCalled) ? " no-GetCurrentBackBufferIndex" : "",
+                state.minWidthOrHeight, state.numFramesToGenerateMax);
             if (g_dlssgStatus == 0)
                 SetStatus("DLSS-G running (status ok)");
             else
@@ -430,40 +458,69 @@ void PollState() {
     if (seconds < 2.0) return;
     std::lock_guard lock(g_mutex);
     const size_t real = g_real.ms.size();
+    const double perReal = real ? double(g_presentedBySl) / real : 0.0;
     char buf[700];
     snprintf(buf, sizeof(buf),
-             "fg: %.1f s: real frames %s | below SL %s | SL presented %llu (%.2f per real frame), tagged %u, "
+             "%.1f s: real frames %s | below SL %s | SL presented %llu (%.2f per real frame), tagged %u, paused %u, "
              "DLSS-G status 0x%x",
              seconds, Summary(g_real.ms, seconds).c_str(), Summary(g_shown.ms, seconds).c_str(),
-             static_cast<unsigned long long>(g_presentedBySl), real ? double(g_presentedBySl) / real : 0.0,
-             g_taggedFrames, g_dlssgStatus);
-    LOG("%s", buf);
-    g_pacing = buf + 4;
+             static_cast<unsigned long long>(g_presentedBySl), perReal, g_taggedFrames, g_pausedFrames, g_dlssgStatus);
+    if (g_options.verboseLog) LOG("fg: %s", buf);
+    g_pacing = buf;
+    {
+        char run[96];
+        snprintf(run, sizeof(run), "%s, %.0f -> %.0f fps", ModeName(g_applied), real / seconds,
+                 g_presentedBySl / seconds);
+        std::lock_guard statusLock(g_statusMutex);
+        g_running = run;
+    }
     g_real.ms.clear();
     g_shown.ms.clear();
     g_presentedBySl = 0;
     g_taggedFrames = 0;
+    g_pausedFrames = 0;
     g_windowStart = now;
 }
 
-// Around the game's Present: PCL markers for the frame being presented, then a new frame
-// token, the Reflex sleep and the next frame's start markers (as close as an add-on gets).
+// Around the game's Present: what DLSS-G should do for this frame, PCL markers for it,
+// then a new frame token, the Reflex sleep and the next frame's start markers (as close
+// as an add-on gets).
 template <class F>
 HRESULT PresentWithMarkers(F&& present) {
     if (g_state != State::ok) return present();
     sl::FrameToken* token = nullptr;
-    bool apply = false;
+    bool dirty = false, resizing = false, tagged = false;
     {
         std::lock_guard lock(g_mutex);
         token = g_token;
-        apply = g_optionsDirty;
+        dirty = g_optionsDirty;
         g_optionsDirty = false;
+        tagged = g_taggedFrame == static_cast<uint32_t>(*token);
+        if (g_resizeFrames) {
+            --g_resizeFrames;
+            resizing = true;
+        }
         Note(g_real);
     }
-    if (apply) ApplyOptions();
+    // No tags for this frame (DLSS SR off or fell back: loading, camera cuts): nothing to
+    // generate from, so pause DLSS-G rather than let it complain every frame.
+    // Short gaps (a camera-cut frame) aren't logged; a pause of kPauseLogFrames or more is.
+    const uint32_t wasUntagged = g_untagged;
+    g_untagged = tagged ? 0 : g_untagged + 1;
+    if (g_untagged == kPauseLogFrames && g_options.mode != Mode::off)
+        LOG("fg: paused: DLSS Super Resolution isn't running");
+    if (dirty) LOG("fg: frame generation %s selected", ModeName(g_options.mode));
+    Mode want = g_options.mode;
+    if (resizing || !tagged) want = Mode::off;
+    if (want == Mode::off && g_options.mode != Mode::off) {
+        std::lock_guard lock(g_mutex);
+        ++g_pausedFrames;
+    }
+    if (want != g_applied || dirty)
+        ApplyMode(want, want != Mode::off && wasUntagged >= kPauseLogFrames ? "resumed" : nullptr);
     Marker(sl::PCLMarker::eRenderSubmitEnd, *token);
     Marker(sl::PCLMarker::ePresentStart, *token);
-    ++g_realPresents;  // before: ReShade sees this frame's presents inside the call (factory hook)
+    ++g_realPresents;  // before: in case ReShade sees this frame's presents inside the call
     const HRESULT hr = present();
     Marker(sl::PCLMarker::ePresentEnd, *token);
     PollState();
@@ -479,7 +536,7 @@ HRESULT PresentWithMarkers(F&& present) {
     return hr;
 }
 
-// ---- factory hook ------------------------------------------------------------------------
+// ---- swap chain hooks --------------------------------------------------------------------
 
 using CreateSwapChainFn = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory*, IUnknown*, DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**);
 using CreateSwapChainForHwndFn = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory2*, IUnknown*, HWND, const DXGI_SWAP_CHAIN_DESC1*,
@@ -487,14 +544,22 @@ using CreateSwapChainForHwndFn = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory2*, IUn
                                                              IDXGISwapChain1**);
 using PresentFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
 using Present1Fn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain1*, UINT, UINT, const DXGI_PRESENT_PARAMETERS*);
+using SetFullscreenStateFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, BOOL, IDXGIOutput*);
+using ResizeBuffersFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
+using ResizeBuffers1Fn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain3*, UINT, UINT, UINT, DXGI_FORMAT, UINT, const UINT*,
+                                                     IUnknown* const*);
 
 CreateSwapChainFn g_createSwapChain = nullptr;
 CreateSwapChainForHwndFn g_createSwapChainForHwnd = nullptr;
-PresentFn g_slPresent = nullptr;     // SL proxy's own Present (factory hook)
+// The SL proxy swap chain's own functions.
+PresentFn g_slPresent = nullptr;
 Present1Fn g_slPresent1 = nullptr;
+SetFullscreenStateFn g_slSetFullscreenState = nullptr;
+ResizeBuffersFn g_slResizeBuffers = nullptr;
+ResizeBuffers1Fn g_slResizeBuffers1 = nullptr;
 IDXGIFactory2* g_slFactory = nullptr;  // SL proxy of g_slFactoryBase
 IUnknown* g_slFactoryBase = nullptr;
-IDXGISwapChain* g_slSwapchain = nullptr;  // SL proxy the game (factory) or ReShade (upgrade) presents through
+IDXGISwapChain* g_slSwapchain = nullptr;  // SL proxy swap chain ReShade presents through
 
 IDXGIFactory2* SlFactory(IDXGIFactory* native) {
     if (!EnsureSl()) return nullptr;
@@ -523,13 +588,62 @@ HRESULT STDMETHODCALLTYPE SlProxyPresent1(IDXGISwapChain1* self, UINT sync, UINT
     return PresentWithMarkers([&] { return g_slPresent1(self, sync, flags, p); });
 }
 
+// NVIDIA: DLSS-G must be off while the swap chain is resized or changes fullscreen state,
+// or Present can deadlock. Switch it off now and keep it off for a few presents.
+void OffForResize(const char* what) {
+    if (g_state != State::ok) return;
+    {
+        std::lock_guard lock(g_mutex);
+        g_resizeFrames = kResizeFrames;
+    }
+    if (g_applied != Mode::off && g_applied != Mode::count) ApplyMode(Mode::off, nullptr);
+    LOG("fg: DLSS-G off for %s", what);
+}
+
+HRESULT STDMETHODCALLTYPE SlProxySetFullscreenState(IDXGISwapChain* self, BOOL fs, IDXGIOutput* target) {
+    OffForResize(fs ? "a switch to fullscreen" : "a switch to windowed");
+    return g_slSetFullscreenState(self, fs, target);
+}
+
+HRESULT STDMETHODCALLTYPE SlProxyResizeBuffers(IDXGISwapChain* self, UINT n, UINT w, UINT h, DXGI_FORMAT f, UINT flags) {
+    OffForResize("a swap chain resize");
+    return g_slResizeBuffers(self, n, w, h, f, flags);
+}
+
+HRESULT STDMETHODCALLTYPE SlProxyResizeBuffers1(IDXGISwapChain3* self, UINT n, UINT w, UINT h, DXGI_FORMAT f, UINT flags,
+                                                const UINT* masks, IUnknown* const* queues) {
+    OffForResize("a swap chain resize");
+    return g_slResizeBuffers1(self, n, w, h, f, flags, masks, queues);
+}
+
 void AttachToSlSwapchain(IDXGISwapChain* sc) {
     g_slSwapchain = sc;
     PatchSlot(sc, 8, &SlProxyPresent, g_slPresent, "SL IDXGISwapChain::Present");
+    PatchSlot(sc, 10, &SlProxySetFullscreenState, g_slSetFullscreenState, "SL IDXGISwapChain::SetFullscreenState");
+    PatchSlot(sc, 13, &SlProxyResizeBuffers, g_slResizeBuffers, "SL IDXGISwapChain::ResizeBuffers");
     PatchSlot(sc, 22, &SlProxyPresent1, g_slPresent1, "SL IDXGISwapChain1::Present1");
+    PatchSlot(sc, 39, &SlProxyResizeBuffers1, g_slResizeBuffers1, "SL IDXGISwapChain3::ResizeBuffers1");
     std::lock_guard lock(g_mutex);
     g_optionsDirty = true;
     SetStatus("swap chain created through Streamline");
+}
+
+// The game's swap chain creation, from the game or (as in The Quarry) from ReShade, goes
+// through the SL factory proxy. Streamline's own call back down passes through.
+template <class Create>
+HRESULT CreateThroughSl(IDXGIFactory* self, const void* ret, const char* what, IDXGISwapChain** out, Create&& create) {
+    if (t_inside || !g_hooked || !(FromGame(ret) || FromReShade(ret))) return E_NOTIMPL;
+    g_reshadeAbove = FromReShade(ret);
+    IDXGIFactory2* proxy = SlFactory(self);
+    if (!proxy) return E_NOTIMPL;
+    HRESULT hr;
+    {
+        Inside guard;
+        hr = create(proxy);
+    }
+    LOG("fg: %s through Streamline: 0x%08x", what, static_cast<unsigned>(hr));
+    if (SUCCEEDED(hr) && out && *out) AttachToSlSwapchain(*out);
+    return hr;
 }
 
 HRESULT STDMETHODCALLTYPE HookCreateSwapChainForHwnd(IDXGIFactory2* self, IUnknown* queue, HWND hwnd,
@@ -539,22 +653,13 @@ HRESULT STDMETHODCALLTYPE HookCreateSwapChainForHwnd(IDXGIFactory2* self, IUnkno
     const void* ret = _ReturnAddress();
     if (!t_inside && desc)
         LOG("fg: CreateSwapChainForHwnd from %s: %ux%u format %d, %u buffers, swap effect %d, flags 0x%x",
-            Caller(ret).c_str(), desc->Width, desc->Height, static_cast<int>(desc->Format),
-            desc->BufferCount, static_cast<int>(desc->SwapEffect), desc->Flags);
-    if (!t_inside && g_options.hook == Hook::factory && (FromGame(ret) || FromReShade(ret))) {
-        g_reshadeAbove = FromReShade(ret);
-        if (IDXGIFactory2* proxy = SlFactory(self)) {
-            HRESULT hr;
-            {
-                Inside guard;
-                hr = proxy->CreateSwapChainForHwnd(queue, hwnd, desc, fs, output, out);
-            }
-            LOG("fg: CreateSwapChainForHwnd through Streamline: 0x%08x", static_cast<unsigned>(hr));
-            if (SUCCEEDED(hr) && out && *out) AttachToSlSwapchain(*out);
-            return hr;
-        }
-    }
-    return g_createSwapChainForHwnd(self, queue, hwnd, desc, fs, output, out);
+            Caller(ret).c_str(), desc->Width, desc->Height, static_cast<int>(desc->Format), desc->BufferCount,
+            static_cast<int>(desc->SwapEffect), desc->Flags);
+    const HRESULT hr = CreateThroughSl(self, ret, "CreateSwapChainForHwnd", reinterpret_cast<IDXGISwapChain**>(out),
+                                       [&](IDXGIFactory2* proxy) {
+                                           return proxy->CreateSwapChainForHwnd(queue, hwnd, desc, fs, output, out);
+                                       });
+    return hr != E_NOTIMPL ? hr : g_createSwapChainForHwnd(self, queue, hwnd, desc, fs, output, out);
 }
 
 HRESULT STDMETHODCALLTYPE HookCreateSwapChain(IDXGIFactory* self, IUnknown* queue, DXGI_SWAP_CHAIN_DESC* desc,
@@ -564,20 +669,9 @@ HRESULT STDMETHODCALLTYPE HookCreateSwapChain(IDXGIFactory* self, IUnknown* queu
         LOG("fg: CreateSwapChain from %s: %ux%u format %d, %u buffers, swap effect %d, flags 0x%x",
             Caller(ret).c_str(), desc->BufferDesc.Width, desc->BufferDesc.Height,
             static_cast<int>(desc->BufferDesc.Format), desc->BufferCount, static_cast<int>(desc->SwapEffect), desc->Flags);
-    if (!t_inside && g_options.hook == Hook::factory && (FromGame(ret) || FromReShade(ret))) {
-        g_reshadeAbove = FromReShade(ret);
-        if (IDXGIFactory2* proxy = SlFactory(self)) {
-            HRESULT hr;
-            {
-                Inside guard;
-                hr = proxy->CreateSwapChain(queue, desc, out);
-            }
-            LOG("fg: CreateSwapChain through Streamline: 0x%08x", static_cast<unsigned>(hr));
-            if (SUCCEEDED(hr) && out && *out) AttachToSlSwapchain(*out);
-            return hr;
-        }
-    }
-    return g_createSwapChain(self, queue, desc, out);
+    const HRESULT hr = CreateThroughSl(self, ret, "CreateSwapChain", out,
+                                       [&](IDXGIFactory2* proxy) { return proxy->CreateSwapChain(queue, desc, out); });
+    return hr != E_NOTIMPL ? hr : g_createSwapChain(self, queue, desc, out);
 }
 
 // Patches the vtable every DXGI factory shares (from system32 dxgi.dll, not ReShade's).
@@ -592,138 +686,11 @@ void InstallFactoryHook() {
         SetStatus("could not create a DXGI factory to hook");
         return;
     }
-    LOG("fg: factory vtable in %s", ModuleName(ModuleOf(*reinterpret_cast<void**>(factory))).c_str());
-    PatchSlot(factory, 10, &HookCreateSwapChain, g_createSwapChain, "IDXGIFactory::CreateSwapChain");
-    PatchSlot(factory, 15, &HookCreateSwapChainForHwnd, g_createSwapChainForHwnd, "IDXGIFactory2::CreateSwapChainForHwnd");
+    g_hooked = PatchSlot(factory, 10, &HookCreateSwapChain, g_createSwapChain, "IDXGIFactory::CreateSwapChain") &&
+               PatchSlot(factory, 15, &HookCreateSwapChainForHwnd, g_createSwapChainForHwnd,
+                         "IDXGIFactory2::CreateSwapChainForHwnd");
     factory->Release();
-    SetStatus("factory hooked, waiting for the game's swap chain");
-}
-
-// ---- upgrade hook ------------------------------------------------------------------------
-// The native swap chain's functions (shared vtable in dxgi.dll). Calls from ReShade on the
-// game's swap chain go to the SL proxy; everything else (Streamline's own calls back into
-// the native swap chain included) goes through unchanged.
-
-IDXGISwapChain* g_native = nullptr;  // the game's native swap chain (upgrade hook)
-bool g_upgradePending = false;
-uint32_t g_redirects = 0;
-
-using GetBufferFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, REFIID, void**);
-using SetFullscreenStateFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, BOOL, IDXGIOutput*);
-using ResizeBuffersFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
-using GetCurrentBackBufferIndexFn = UINT(STDMETHODCALLTYPE*)(IDXGISwapChain3*);
-using ResizeBuffers1Fn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain3*, UINT, UINT, UINT, DXGI_FORMAT, UINT, const UINT*,
-                                                     IUnknown* const*);
-PresentFn g_nPresent = nullptr;
-Present1Fn g_nPresent1 = nullptr;
-GetBufferFn g_nGetBuffer = nullptr;
-SetFullscreenStateFn g_nSetFullscreenState = nullptr;
-ResizeBuffersFn g_nResizeBuffers = nullptr;
-GetCurrentBackBufferIndexFn g_nGetCurrentBackBufferIndex = nullptr;
-ResizeBuffers1Fn g_nResizeBuffers1 = nullptr;
-
-IDXGISwapChain4* Sl4() { return static_cast<IDXGISwapChain4*>(g_slSwapchain); }
-
-bool Redirect(const void* ret, const void* self, const char* what) {
-    if (t_inside || !g_slSwapchain || self != g_native || !FromReShade(ret)) return false;
-    if (++g_redirects <= 40) LOG("fg: ReShade's %s redirected to Streamline", what);
-    return true;
-}
-
-void NoteBelowSl(const void* self) {
-    if (self != g_native) return;
-    std::lock_guard lock(g_mutex);
-    Note(g_shown);
-}
-
-HRESULT STDMETHODCALLTYPE NativePresent(IDXGISwapChain* self, UINT sync, UINT flags) {
-    if (Redirect(_ReturnAddress(), self, "Present") && !(flags & DXGI_PRESENT_TEST))
-        return PresentWithMarkers([&] {
-            Inside guard;
-            return Sl4()->Present(sync, flags);
-        });
-    if (!(flags & DXGI_PRESENT_TEST)) NoteBelowSl(self);
-    return g_nPresent(self, sync, flags);
-}
-
-HRESULT STDMETHODCALLTYPE NativePresent1(IDXGISwapChain1* self, UINT sync, UINT flags, const DXGI_PRESENT_PARAMETERS* p) {
-    if (Redirect(_ReturnAddress(), self, "Present1") && !(flags & DXGI_PRESENT_TEST))
-        return PresentWithMarkers([&] {
-            Inside guard;
-            return Sl4()->Present1(sync, flags, p);
-        });
-    if (!(flags & DXGI_PRESENT_TEST)) NoteBelowSl(self);
-    return g_nPresent1(self, sync, flags, p);
-}
-
-HRESULT STDMETHODCALLTYPE NativeGetBuffer(IDXGISwapChain* self, UINT i, REFIID riid, void** out) {
-    if (Redirect(_ReturnAddress(), self, "GetBuffer")) {
-        Inside guard;
-        return Sl4()->GetBuffer(i, riid, out);
-    }
-    return g_nGetBuffer(self, i, riid, out);
-}
-
-HRESULT STDMETHODCALLTYPE NativeSetFullscreenState(IDXGISwapChain* self, BOOL fs, IDXGIOutput* target) {
-    if (Redirect(_ReturnAddress(), self, "SetFullscreenState")) {
-        Inside guard;
-        return Sl4()->SetFullscreenState(fs, target);
-    }
-    return g_nSetFullscreenState(self, fs, target);
-}
-
-HRESULT STDMETHODCALLTYPE NativeResizeBuffers(IDXGISwapChain* self, UINT n, UINT w, UINT h, DXGI_FORMAT f, UINT flags) {
-    if (Redirect(_ReturnAddress(), self, "ResizeBuffers")) {
-        LOG("fg: ResizeBuffers %ux%u through Streamline", w, h);
-        Inside guard;
-        return Sl4()->ResizeBuffers(n, w, h, f, flags);
-    }
-    return g_nResizeBuffers(self, n, w, h, f, flags);
-}
-
-UINT STDMETHODCALLTYPE NativeGetCurrentBackBufferIndex(IDXGISwapChain3* self) {
-    if (Redirect(_ReturnAddress(), self, "GetCurrentBackBufferIndex")) {
-        Inside guard;
-        return Sl4()->GetCurrentBackBufferIndex();
-    }
-    return g_nGetCurrentBackBufferIndex(self);
-}
-
-HRESULT STDMETHODCALLTYPE NativeResizeBuffers1(IDXGISwapChain3* self, UINT n, UINT w, UINT h, DXGI_FORMAT f, UINT flags,
-                                               const UINT* masks, IUnknown* const* queues) {
-    if (Redirect(_ReturnAddress(), self, "ResizeBuffers1")) {
-        LOG("fg: ResizeBuffers1 %ux%u through Streamline", w, h);
-        Inside guard;
-        return Sl4()->ResizeBuffers1(n, w, h, f, flags, masks, queues);
-    }
-    return g_nResizeBuffers1(self, n, w, h, f, flags, masks, queues);
-}
-
-void UpgradeSwapchain() {
-    if (!EnsureSl()) return;
-    IDXGISwapChain* base = g_native;
-    base->AddRef();  // the reference goes to the proxy
-    void* p = base;
-    if (!Check(g_sl.upgrade(&p), "slUpgradeInterface(IDXGISwapChain)") || p == base) {
-        LOG("fg: Streamline returned no swap chain proxy");
-        base->Release();
-        SetStatus("slUpgradeInterface gave no swap chain proxy");
-        return;
-    }
-    g_slSwapchain = static_cast<IDXGISwapChain*>(p);
-    LOG("fg: swap chain upgraded to an SL proxy (native vtable in %s)",
-        ModuleName(ModuleOf(*reinterpret_cast<void**>(g_native))).c_str());
-    PatchSlot(g_native, 8, &NativePresent, g_nPresent, "IDXGISwapChain::Present");
-    PatchSlot(g_native, 9, &NativeGetBuffer, g_nGetBuffer, "IDXGISwapChain::GetBuffer");
-    PatchSlot(g_native, 10, &NativeSetFullscreenState, g_nSetFullscreenState, "IDXGISwapChain::SetFullscreenState");
-    PatchSlot(g_native, 13, &NativeResizeBuffers, g_nResizeBuffers, "IDXGISwapChain::ResizeBuffers");
-    PatchSlot(g_native, 22, &NativePresent1, g_nPresent1, "IDXGISwapChain1::Present1");
-    PatchSlot(g_native, 36, &NativeGetCurrentBackBufferIndex, g_nGetCurrentBackBufferIndex,
-              "IDXGISwapChain3::GetCurrentBackBufferIndex");
-    PatchSlot(g_native, 39, &NativeResizeBuffers1, g_nResizeBuffers1, "IDXGISwapChain3::ResizeBuffers1");
-    std::lock_guard lock(g_mutex);
-    g_optionsDirty = true;
-    SetStatus("swap chain upgraded; resize it once (F11 twice) so Streamline gets the back buffers");
+    if (g_hooked) SetStatus("factory hooked, waiting for the game's swap chain");
 }
 
 // ---- matrices ----------------------------------------------------------------------------
@@ -771,30 +738,35 @@ const char* ModeName(Mode m) {
 }
 
 void LoadSettings() {
-    int hook = 0;
-    if (reshade::get_config_value(nullptr, kSection, "FrameGeneration", hook) && hook >= 0 && hook <= 2)
-        g_options.hook = static_cast<Hook>(hook);
     char name[16] = {};
     size_t size = sizeof(name);
-    bool on = true;
-    unsigned int frames = 1;
     if (reshade::get_config_value(nullptr, kSection, "FrameGenerationMode", name, &size)) {
         for (int i = 0; i < static_cast<int>(Mode::count); ++i)
             if (strcmp(name, ModeName(static_cast<Mode>(i))) == 0) g_options.mode = static_cast<Mode>(i);
-    } else if (reshade::get_config_value(nullptr, kSection, "FrameGenerationOn", on)) {
-        // 1.0.0-fg.1/2 saved an on/off flag and a generated frame count
-        reshade::get_config_value(nullptr, kSection, "FrameGenerationFrames", frames);
-        g_options.mode = !on ? Mode::off : frames >= 3 ? Mode::x4 : frames == 2 ? Mode::x3 : Mode::x2;
+    } else {
+        // 1.0.0-fg.1/2 test builds: a hook choice, an on/off flag and a frame count.
+        int hook = 0;
+        bool on = true;
+        unsigned int frames = 1;
+        if (reshade::get_config_value(nullptr, kSection, "FrameGeneration", hook) && hook != 0) {
+            reshade::get_config_value(nullptr, kSection, "FrameGenerationOn", on);
+            reshade::get_config_value(nullptr, kSection, "FrameGenerationFrames", frames);
+            g_options.mode = !on ? Mode::off : frames >= 3 ? Mode::x4 : frames == 2 ? Mode::x3 : Mode::x2;
+        }
     }
     reshade::get_config_value(nullptr, kSection, "FrameGenerationCopyTags", g_options.copyTags);
-    static const char* names[] = {"off", "factory hook", "swap chain upgrade"};
-    LOG("fg: settings: %s, mode %s, copy tags %d", names[static_cast<int>(g_options.hook)], ModeName(g_options.mode),
-        g_options.copyTags);
-    if (g_options.hook != Hook::off) SetStatus("waiting for the D3D12 device");
+    const std::wstring dir = GameDir();
+    g_filesPresent = true;
+    for (const wchar_t* f : kFiles)
+        if (GetFileAttributesW((dir + f).c_str()) == INVALID_FILE_ATTRIBUTES) {
+            if (g_options.mode != Mode::off) LOG("fg: %ls not found next to the game exe", f);
+            g_filesPresent = false;
+        }
+    LOG("fg: settings: frame generation %s, copy tags %d, Streamline files %s", ModeName(g_options.mode),
+        g_options.copyTags, g_filesPresent ? "present" : "missing");
 }
 
 void SaveSettings() {
-    reshade::set_config_value(nullptr, kSection, "FrameGeneration", static_cast<int>(g_options.hook));
     reshade::set_config_value(nullptr, kSection, "FrameGenerationMode", ModeName(g_options.mode));
     reshade::set_config_value(nullptr, kSection, "FrameGenerationCopyTags", g_options.copyTags);
     std::lock_guard lock(g_mutex);
@@ -802,33 +774,14 @@ void SaveSettings() {
 }
 
 void OnInitDevice(reshade::api::device* dev) {
-    if (g_options.hook == Hook::off || dev->get_api() != reshade::api::device_api::d3d12) return;
+    if (g_options.mode == Mode::off || !g_filesPresent || dev->get_api() != reshade::api::device_api::d3d12) return;
     g_device = reinterpret_cast<ID3D12Device*>(dev->get_native());
     g_luid = g_device->GetAdapterLuid();
-    if (g_options.hook == Hook::factory && !g_createSwapChainForHwnd) InstallFactoryHook();
-}
-
-void OnInitSwapchain(reshade::api::swapchain* sc, bool resize) {
-    if (g_options.hook != Hook::upgrade || sc->get_device()->get_api() != reshade::api::device_api::d3d12) return;
-    if (resize) {
-        LOG("fg: swap chain resized%s", g_slSwapchain ? " (back buffers should now be Streamline's)" : "");
-        return;
-    }
-    if (g_native) return;
-    // Not here: this runs inside the game's CreateSwapChainForHwnd. Next ReShade present.
-    g_native = reinterpret_cast<IDXGISwapChain*>(sc->get_native());
-    g_upgradePending = true;
-}
-
-void Tick() {
-    if (g_upgradePending) {
-        g_upgradePending = false;
-        UpgradeSwapchain();
-    }
+    if (!g_hooked) InstallFactoryHook();
 }
 
 bool IsRealPresent() {
-    if (g_options.hook != Hook::factory || !g_slSwapchain || g_reshadeAbove) return true;
+    if (!g_slSwapchain || g_reshadeAbove) return true;
     {
         std::lock_guard lock(g_mutex);
         Note(g_shown);
@@ -845,7 +798,6 @@ void TagFrame(const FrameInputs& in) {
     {
         std::lock_guard lock(g_mutex);
         token = g_token;
-        ++g_taggedFrames;
     }
 
     sl::Constants c;
@@ -884,7 +836,7 @@ void TagFrame(const FrameInputs& in) {
     c.orthographicProjection = sl::Boolean::eFalse;
     c.motionVectorsDilated = sl::Boolean::eFalse;
     c.motionVectorsJittered = in.mvJittered ? sl::Boolean::eTrue : sl::Boolean::eFalse;
-    Check(g_sl.setConstants(c, *token, Viewport()), "slSetConstants");
+    if (!Check(g_sl.setConstants(c, *token, Viewport()), "slSetConstants")) return;
 
     const auto life = g_options.copyTags ? sl::ResourceLifecycle::eOnlyValidNow : sl::ResourceLifecycle::eValidUntilPresent;
     sl::Resource depth(sl::ResourceType::eTex2d, in.depth, nullptr, nullptr, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -900,9 +852,14 @@ void TagFrame(const FrameInputs& in) {
         sl::ResourceTag(nullptr, sl::kBufferTypeBackbuffer, sl::ResourceLifecycle::eValidUntilPresent, &screen),
     };
     const uint32_t count = screen ? 3u : 2u;
-    Check(g_sl.setTag(*token, Viewport(), tags, count, in.cmd), "slSetTagForFrame");
+    if (!Check(g_sl.setTag(*token, Viewport(), tags, count, in.cmd), "slSetTagForFrame")) return;
+    {
+        std::lock_guard lock(g_mutex);
+        g_taggedFrame = static_cast<uint32_t>(*token);
+        ++g_taggedFrames;
+    }
     static uint32_t logged = 0;
-    if (++logged == 1 || in.reset && logged < 200)
+    if (++logged == 1 || (g_options.verboseLog && in.reset && logged < 200))
         LOG("fg: tagged frame %u: render %ux%u, back buffer subrect %u,%u %ux%u, near %.2f, fov %.1f deg, aspect %.3f%s",
             static_cast<uint32_t>(*token), in.renderW, in.renderH, screen.left, screen.top, screen.width, screen.height,
             c.cameraNear, c.cameraFOV * 57.29578f, c.cameraAspectRatio, in.reset ? ", reset" : "");
@@ -911,6 +868,23 @@ void TagFrame(const FrameInputs& in) {
 void Shutdown() { UnpatchAll(); }
 
 bool Loaded() { return g_state == State::ok; }
+
+bool Selectable() { return g_filesPresent && g_state != State::failed; }
+
+std::string FriendlyStatus() {
+    if (!g_filesPresent)
+        return "Not installed: needs the Streamline files next to the game exe (see the README).";
+    if (g_options.mode == Mode::off) return g_state == State::ok ? "Off." : "";
+    if (!g_hooked) return "Restart the game to turn on frame generation.";
+    std::lock_guard lock(g_statusMutex);
+    if (g_state == State::failed) return "Not available: " + g_status + ".";
+    if (g_state != State::ok || !g_slSwapchain) return "Starting: load into the game.";
+    if (g_dlssgStatus != 0 && g_dlssgStatus != 0xffffffffu) return "Problem: " + g_status + ".";
+    if (g_untagged >= kPauseLogFrames) return "Paused: needs DLSS Super Resolution running.";
+    std::string s = "Active: " + (g_running.empty() ? std::string(ModeName(g_options.mode)) : g_running) + ".";
+    if (g_options.mode == Mode::dynamic && !g_dynamicSupported) s += " Dynamic isn't supported here, so 2x.";
+    return s;
+}
 
 std::string Status() {
     std::lock_guard lock(g_statusMutex);

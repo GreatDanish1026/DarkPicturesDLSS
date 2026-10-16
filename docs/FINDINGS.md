@@ -754,6 +754,37 @@ Streamline is only initialised once a swap chain is being created (factory) or e
   covers custom render scales above 72%. Ultra Quality stays in the menu (the user asked
   to keep it now that it can work). Not yet confirmed in game.
 
+- **Run 5 (1.0.0-fg.5, 2026-10-16):** Ultra Quality works, with DLSS SR and frame generation
+  on (user report). Earlier the same day 4x and Dynamic were reported working well, with no
+  issues on subtitles or QTE prompts.
+
+### 1.0.0-fg.6: release clean-up (for 1.1)
+
+- **Factory hook only.** The swap chain upgrade path and the hook choice are gone. Frame
+  generation is one setting, `FrameGenerationMode` = Off / 2x / 3x / 4x / Dynamic, Off by
+  default. The factory hook (and so Streamline) is only installed when it's on at launch
+  and all six Streamline files are next to the exe. Turning it on from Off asks for a
+  restart; turning it off takes effect live (`eOff` with `eRetainResourcesWhenOff`). The
+  fg.1/fg.2 keys still migrate. Reflex low latency is on whenever frame generation is (no
+  separate switch, since DLSS-G requires it).
+- **Paused without DLSS SR.** If the frame being presented wasn't tagged (DLSS off, loading
+  screens, camera-cut frames where DLSS falls back), DLSS-G is set to Off for that
+  present and back on with the next tagged one. That ends the per-frame "missing common
+  constants" / "Failed to find global tag" errors. Pauses of 30+ frames are logged and shown
+  ("Paused: needs DLSS Super Resolution running"); single cut frames aren't.
+- **Resize and fullscreen safety.** The SL swap chain's ResizeBuffers, ResizeBuffers1 and
+  SetFullscreenState are wrapped: DLSS-G is switched off before the call (from that
+  thread) and stays off for 3 presents, as NVIDIA's guide asks, to avoid a Present
+  deadlock. Not yet exercised in game: F11 or alt-tab with frame generation on.
+- **Quieter log.** Streamline's info lines and the 2-second pacing lines only appear with
+  Diagnostics > Verbose log. A repeating Streamline warning or error is logged 3 times,
+  then every 1000th time with a count.
+- **Overlay.** The main panel has "Frame generation" right under the DLSS quality mode,
+  with a tooltip and one status line ("Active: 2x, 78 -> 156 fps.", "Paused: ...",
+  "Restart the game to turn on frame generation.", "Not installed: ..."). It's greyed out
+  while DLSS SR is off or the Streamline files are missing. The technical status, the
+  pacing line and the tag-copy switch moved to Diagnostics.
+
 ### Results
 
 | Question | Factory hook | Swap chain upgrade |
