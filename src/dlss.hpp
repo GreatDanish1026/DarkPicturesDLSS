@@ -54,7 +54,7 @@ Result Evaluate(const Frame& f);
 bool PatchLightingHistory(command_list* cmd, resource texture, bool compute, uint64_t frame);
 uint64_t LightingHistoryPatches();
 // Copies the next DLSS frame's colour, velocity, motion and depth to files next to the exe.
-void RequestCapture();
+void RequestCapture(bool afterNextCut = false);  // or 45 frames after the next camera cut
 std::string CaptureStatus();
 void OnDestroyResource(resource r);  // drops cached views of game textures
 void Shutdown(device* dev);

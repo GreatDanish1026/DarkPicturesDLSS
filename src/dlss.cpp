@@ -336,6 +336,9 @@ struct CaptureItem {
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
 };
 bool g_captureWanted = false;
+bool g_captureArmed = false;     // capture kCaptureArmedAge frames after the next reset
+bool g_captureSawReset = false;
+constexpr uint32_t kCaptureArmedAge = 45;
 uint32_t g_captureWait = 0;  // presents until the copies are read back
 std::vector<CaptureItem> g_capture;
 std::string g_captureHeader;
@@ -400,8 +403,12 @@ void FinishCapture() {
     std::string header = g_captureHeader;
     for (auto& item : g_capture) {
         void* p = nullptr;
-        const D3D12_RANGE range = {0, static_cast<SIZE_T>(item.footprint.Footprint.RowPitch) * item.rows};
-        if (FAILED(item.buffer->Map(0, &range, &p)) || !p) continue;
+        // Whole buffer: the last row isn't padded to RowPitch, so rows * RowPitch overruns it.
+        const HRESULT hr = item.buffer->Map(0, nullptr, &p);
+        if (FAILED(hr) || !p) {
+            LOG("capture: could not map the %s readback buffer (0x%08x)", item.name.c_str(), static_cast<unsigned>(hr));
+            continue;
+        }
         const std::string file = base + "_" + item.name + ".bin";
         if (FILE* f = fopen(file.c_str(), "wb")) {
             for (UINT y = 0; y < item.rows; ++y)
@@ -705,6 +712,13 @@ Result Evaluate(const Frame& f) {
     g_statsAge[slot] = age;
 
     // Texture capture: the game's colour and velocity, and the motion / depth DLSS gets.
+    if (g_captureArmed) {
+        if (age == 0) g_captureSawReset = true;
+        if (g_captureSawReset && age == kCaptureArmedAge) {
+            g_captureArmed = g_captureSawReset = false;
+            g_captureWanted = true;
+        }
+    }
     if (g_captureWanted && g_capture.empty()) {
         g_captureWanted = false;
         CaptureTexture(cmd, f.color, resource_usage::shader_resource_non_pixel, "color");
@@ -803,8 +817,15 @@ Result Evaluate(const Frame& f) {
     return Result::done;
 }
 
-void RequestCapture() {
+void RequestCapture(bool afterNextCut) {
     if (!g_capture.empty()) return;
+    if (afterNextCut) {
+        g_captureArmed = true;
+        g_captureSawReset = false;
+        g_captureStatus = "armed: " + std::to_string(kCaptureArmedAge) + " frames after the next cut";
+        LOG("capture: armed for %u frames after the next cut", kCaptureArmedAge);
+        return;
+    }
     g_captureWanted = true;
     g_captureStatus = "waiting for the next DLSS frame";
 }

@@ -398,6 +398,11 @@ Frame dump 1705 (0.5.10, kick close-up, 85 frames after a reset that reached DLS
   (rows tightly packed) plus a `.txt` header next to the exe. The header has the
   sizes, DXGI formats, render/output rects, jitter, pre-exposure, guard state and
   ClipToPrevClip, enough to recompute camera motion per pixel offline.
+- 0.5.16's first captures (frames 1934 and 2253) wrote headers but no textures. Map
+  was given a read range of rows x RowPitch, but the last row isn't padded, so the
+  range overran the buffer. 0.5.17 maps the whole buffer and logs any failure. Both
+  captures also landed in the kick shot: "Yah!" lasts only ~90 frames. 0.5.17 adds
+  **Ctrl+Shift+F8**, which arms a capture 45 frames after the next camera cut.
 
 ### Crash report from a probe 0.3.1 session
 

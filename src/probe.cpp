@@ -1482,7 +1482,7 @@ void OnReshadePresent(effect_runtime* rt) {
     dlss::Tick(rt);
     if (rt->is_key_down(VK_CONTROL) && rt->is_key_pressed(VK_F9)) RequestDump();  // not F11: UE toggles fullscreen on it
     if (rt->is_key_down(VK_CONTROL) && rt->is_key_pressed(VK_F10)) RequestCbDump();
-    if (rt->is_key_down(VK_CONTROL) && rt->is_key_pressed(VK_F8)) dlss::RequestCapture();
+    if (rt->is_key_down(VK_CONTROL) && rt->is_key_pressed(VK_F8)) dlss::RequestCapture(rt->is_key_down(VK_SHIFT));
 }
 
 void DrawOverlay(effect_runtime*) {
@@ -1531,6 +1531,8 @@ void DrawOverlay(effect_runtime*) {
     if (ImGui::Button(g_dumpFrame ? "Capturing..." : "Dump next frame (Ctrl+F9)")) RequestDump();
     if (!g_lastDumpFile.empty()) ImGui::Text("Last dump: %s", g_lastDumpFile.c_str());
     if (ImGui::Button("Capture DLSS input textures (Ctrl+F8)")) dlss::RequestCapture();
+    ImGui::SameLine();
+    if (ImGui::Button("45 frames after the next cut (Ctrl+Shift+F8)")) dlss::RequestCapture(true);
     if (!dlss::CaptureStatus().empty()) ImGui::Text("Capture: %s", dlss::CaptureStatus().c_str());
     if (ImGui::Button(g_cbDumpFirst ? "Capturing constants..." : "Dump TAA constants, 8 frames (Ctrl+F10)"))
         RequestCbDump();
