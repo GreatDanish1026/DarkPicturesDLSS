@@ -2,7 +2,9 @@ Third-party notices
 ===================
 
 QuarryDLSS.addon64 is compiled against the following headers, which are
-included in the source repository under third_party/.
+included in the source repository under third_party/. The release package
+also includes NVIDIA runtime files, listed in the last two sections, with
+their licence texts in the licenses/ folder.
 
 ----------------------------------------------------------------------------
 ReShade add-on API headers (third_party/reshade/include)
@@ -51,8 +53,13 @@ NVIDIA DLSS SDK 310.9.1 (third_party/dlss: NGX headers and nvsdk_ngx_s.lib)
 https://github.com/NVIDIA/DLSS
 ----------------------------------------------------------------------------
 Copyright (c) NVIDIA Corporation. Used under the NVIDIA RTX SDKs license, see
-third_party/dlss/LICENSE.txt. The DLSS runtime (nvngx_dlss.dll) is not part of
-this repository; build.ps1 -Install copies it from an existing install.
+third_party/dlss/LICENSE.txt.
+
+This software uses NVIDIA DLSS (Super Resolution and Frame Generation). The
+release package includes the NVIDIA DLSS runtime, nvngx_dlss.dll and
+nvngx_dlssg.dll (310.9.1), distributed under the NVIDIA RTX SDKs license
+(licenses/NVIDIA-DLSS-LICENSE.txt). They are not part of the source
+repository.
 
 
 ----------------------------------------------------------------------------
@@ -60,7 +67,11 @@ NVIDIA Streamline SDK 2.14.1 headers (third_party/streamline/include)
 https://github.com/NVIDIA-RTX/Streamline
 ----------------------------------------------------------------------------
 Copyright (c) 2022-2023 NVIDIA CORPORATION. MIT license, see
-third_party/streamline/LICENSE.txt. Only the frame generation experiment
-(fg.cpp, off by default) uses them. The Streamline runtime (sl.*.dll) and
-nvngx_dlssg.dll are not part of this repository; build.ps1 -InstallStreamline
-copies them from NVIDIA's SDK release.
+third_party/streamline/LICENSE.txt (licenses/Streamline-LICENSE.txt in the
+release package). Only frame generation (fg.cpp, off by default) uses them.
+
+The release package includes the Streamline 2.14.1 runtime from NVIDIA's SDK
+release: sl.interposer.dll, sl.common.dll, sl.dlss_g.dll and sl.pcl.dll (MIT
+license, as above) and sl.reflex.dll (NVIDIA Reflex, under the NVIDIA SDK
+license in licenses/NVIDIA-Reflex-LICENSE.txt). They are not part of the
+source repository.

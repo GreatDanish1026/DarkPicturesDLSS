@@ -938,8 +938,15 @@ Streamline is only initialised once a swap chain is being created (factory) or e
   - `nvngx_dlssg.dll` and the DLSS runtime are under the NVIDIA RTX SDKs license.
     Distribution is only allowed "incorporated in object code format into a software
     application", with "material additional functionality", and never "as a stand-alone
-    product". A mod shouldn't ship them; users copy them from the SDK, as with
-    nvngx_dlss.dll.
+    product". **Decision for 1.1 (user):** the release package bundles them with the add-on,
+    which is such an application, together with the five Streamline DLLs (MIT, and
+    sl.reflex under the NVIDIA SDK license, which allows distributing its distributable
+    parts inside an application). `build.ps1 -Package` builds it, with the licence texts
+    in `licenses/` and an attribution in THIRD_PARTY_NOTICES.txt. All seven DLLs come from
+    the Streamline 2.14.1 release and carry valid NVIDIA Corporation signatures;
+    `nvngx_dlss.dll` is the same 310.9.1 as before. Remaining terms: attribute DLSS (done
+    in the notices), distribute under consistent terms, and notify NVIDIA only before a
+    commercial release (not the case for this free mod).
   - The guide says `Preferences::applicationId` is "provided by NVIDIA, required if using
     NGX components"; we pass only the project id and engine type, as DLSS SR does. Whether
     production `sl.dlss_g` accepts that is one of the things the first run shows.

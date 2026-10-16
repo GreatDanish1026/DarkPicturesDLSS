@@ -1,22 +1,30 @@
 # Builds bin\QuarryDLSS.addon64 with MSVC (Visual Studio 2022+ with C++ tools).
 # MSVC is required: ReShade is built with it, and MinGW returns API structs
 # (resource, resource_desc, ...) differently, which crashes inside ReShade.
-# Usage: .\build.ps1 [-Test] [-Install]
+# Usage: .\build.ps1 [-Test] [-Install] [-InstallStreamline] [-Package]
 #   -Test     also builds and runs tests\dxbc_tests.cpp
 #   -Install  copies the add-on next to TheQuarry-Win64-Shipping.exe, plus nvngx_dlss.dll
 #             from -DlssDll if the game folder doesn't have that version yet
-#   -InstallStreamline  frame generation experiment: copies the Streamline runtime DLLs
-#             (sl.interposer, sl.common, sl.dlss_g, sl.reflex, sl.pcl, nvngx_dlssg) from
-#             -StreamlineBin (bin\x64 of NVIDIA's SDK release; not redistributed in this repo)
+#   -InstallStreamline  frame generation: copies the Streamline runtime DLLs (sl.interposer,
+#             sl.common, sl.dlss_g, sl.reflex, sl.pcl, nvngx_dlssg) from -StreamlineBin
+#   -Package  makes bin\release\QuarryDLSS-<version>.zip: the add-on, the NVIDIA runtime
+#             (nvngx_dlss, nvngx_dlssg and the five Streamline DLLs), README, LICENSE,
+#             THIRD_PARTY_NOTICES.txt and the NVIDIA licence texts
+# -StreamlineBin is bin\x64 of NVIDIA's Streamline SDK release (2.14.1, from
+# github.com/NVIDIA-RTX/Streamline/releases); its DLLs aren't in this repository.
 param(
     [switch]$Install,
     [switch]$Test,
     [switch]$InstallStreamline,
+    [switch]$Package,
     [string]$StreamlineBin = "$PSScriptRoot\third_party\streamline\bin\x64",
     [string]$GameBin = "E:\SteamLibrary\steamapps\common\The Quarry\SMG026\Binaries\Win64",
-    # DLSS runtime matching the SDK in third_party\dlss (310.9.1). It isn't redistributed in this repo.
-    [string]$DlssDll = "E:\Non-Steam Games\The Witcher 3 Wild Hunt\bin\x64_dx12\nvngx_dlss.dll"
+    # DLSS runtime matching the SDK in third_party\dlss (310.9.1): the copy in the Streamline SDK release.
+    [string]$DlssDll = "$StreamlineBin\nvngx_dlss.dll"
 )
+# The NVIDIA files the add-on needs next to the game exe.
+$nvidiaRuntime = "nvngx_dlss.dll", "nvngx_dlssg.dll", "sl.interposer.dll", "sl.common.dll", "sl.dlss_g.dll",
+                 "sl.reflex.dll", "sl.pcl.dll"
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 
@@ -79,9 +87,33 @@ if ($Install) {
 if ($InstallStreamline) {
     if (-not (Test-Path "$GameBin\TheQuarry-Win64-Shipping.exe")) { throw "Game not found in $GameBin" }
     if (Get-Process TheQuarry-Win64-Shipping -ErrorAction SilentlyContinue) { throw "Close the game first." }
-    foreach ($dll in "sl.interposer.dll", "sl.common.dll", "sl.dlss_g.dll", "sl.reflex.dll", "sl.pcl.dll", "nvngx_dlssg.dll") {
+    foreach ($dll in $nvidiaRuntime | Where-Object { $_ -ne "nvngx_dlss.dll" }) {
         if (-not (Test-Path "$StreamlineBin\$dll")) { throw "$dll not found in $StreamlineBin (pass -StreamlineBin)" }
         Copy-Item "$StreamlineBin\$dll" $GameBin -Force
     }
     Write-Host "Copied the Streamline runtime from $StreamlineBin to $GameBin"
+}
+
+if ($Package) {
+    $version = (Select-String -Path "$root\src\version.h" -Pattern '#define QDLSS_VERSION "([^"]+)"').Matches[0].Groups[1].Value
+    $stage = "$root\bin\release\QuarryDLSS-$version"
+    if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+    New-Item -ItemType Directory -Force "$stage\licenses" | Out-Null
+    # Everything at the top level goes next to TheQuarry-Win64-Shipping.exe.
+    Copy-Item "$root\bin\QuarryDLSS.addon64" $stage
+    foreach ($dll in $nvidiaRuntime) {
+        if (-not (Test-Path "$StreamlineBin\$dll")) { throw "$dll not found in $StreamlineBin (pass -StreamlineBin)" }
+        Copy-Item "$StreamlineBin\$dll" $stage
+    }
+    Copy-Item "$root\README.md", "$root\LICENSE", "$root\THIRD_PARTY_NOTICES.txt" $stage
+    Copy-Item "$root\third_party\streamline\LICENSE.txt" "$stage\licenses\Streamline-LICENSE.txt"
+    Copy-Item "$root\third_party\streamline\licenses\nvngx_dlss.license.txt" "$stage\licenses\NVIDIA-DLSS-LICENSE.txt"
+    Copy-Item "$root\third_party\streamline\licenses\reflex.license.txt" "$stage\licenses\NVIDIA-Reflex-LICENSE.txt"
+    $zip = "$root\bin\release\QuarryDLSS-$version.zip"
+    if (Test-Path $zip) { Remove-Item -Force $zip }
+    Compress-Archive -Path "$stage\*" -DestinationPath $zip
+    Write-Host "Packaged $zip"
+    Get-ChildItem $stage -Recurse -File | ForEach-Object {
+        "{0,-40} {1,-14} {2,12:N0}" -f $_.FullName.Substring($stage.Length + 1), $_.VersionInfo.FileVersion, $_.Length
+    }
 }
