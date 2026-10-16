@@ -832,9 +832,11 @@ void RequestCapture(bool afterNextCut) {
     if (!g_capture.empty()) return;
     if (afterNextCut) {
         g_captureArmed = true;
-        g_captureSawReset = false;
-        g_captureStatus = "armed: " + std::to_string(kCaptureArmedAge) + " frames after the next cut";
-        LOG("capture: armed for %u frames after the next cut", kCaptureArmedAge);
+        // Pressed early in a shot (a short one like "Yah!"): take this shot.
+        g_captureSawReset = g_framesSinceReset < kCaptureArmedAge;
+        g_captureStatus = "armed: " + std::to_string(kCaptureArmedAge) + " frames into " +
+                          (g_captureSawReset ? "this shot" : "the next shot");
+        LOG("capture: armed for frame %u of %s", kCaptureArmedAge, g_captureSawReset ? "this shot" : "the next shot");
         return;
     }
     g_captureWanted = true;

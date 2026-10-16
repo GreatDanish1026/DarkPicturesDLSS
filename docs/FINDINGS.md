@@ -415,6 +415,12 @@ Frame dump 1705 (0.5.10, kick close-up, 85 frames after a reset that reached DLS
   analyser checks each candidate motion field (game, camera-only, inverted game, zero,
   what DLSS got) by reprojecting frame 1 into frame 0 and measuring the colour error.
   The best match is the motion that's actually right.
+- **Method check (kick shot, frames 6531-6532):** on the 14.7% of pixels where the game's
+  velocity disagrees with camera motion, the reprojection error was 0.238 for game
+  velocity, 0.397 camera-only, 0.387 zero and 0.447 inverted. So the game's velocity is
+  right for the moving characters there, and the test separates right from wrong
+  motion. The armed capture missed "Yah!" again, because it was pressed just after that
+  cut. 0.5.19 arms for frame 45 of the current shot if it's younger than that.
 
 ### Crash report from a probe 0.3.1 session
 
