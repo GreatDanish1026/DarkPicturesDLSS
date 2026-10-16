@@ -838,6 +838,33 @@ Streamline is only initialised once a swap chain is being created (factory) or e
   on; (b) frame generation on with Diagnostics > "Streamline copies motion vectors and
   depth when tagged" unchecked (`eValidUntilPresent`, so no clone copies).
 
+### Run 8 (1.0.0-fg.7, 2026-10-16 14:39-14:42): the F11 hang is DLSS Super Resolution's
+
+- 14:39: F11 cycles with DLSS off were fine. With DLSS on, and frame generation set to
+  Off live (Streamline still loaded), F11 hung as before.
+- 14:42, frame generation **Off from launch** (no Streamline loaded), DLSS on at Ultra
+  Quality: F11 to 1280x720 at 05.08 (DLSS created 988x412 -> 1280x533 and ran), F11 back to
+  3840x2160 at 06.29 (DLSS reused the cached 2960x1232 -> 3840x1600 feature, recreated the
+  motion/depth and lighting-history textures and ran). 11 frames later the game wrote back
+  100% for a frame ("not upscaling" at 07.61), then the GPU hung. **Alt-tab doesn't hang**:
+  it doesn't resize the swap chain.
+- So the hang is in the DLSS SR path, on the first frames after the swap chain grows. It
+  isn't frame generation, and it's probably in 1.0.0 too: F11 with DLSS on was never
+  tested before. Same shape in runs 6 and 7: device lost about 4 s after the
+  "not upscaling" frame.
+- Prime suspect: the stabilised-lighting copy (`PatchLightingHistory`). It copies the
+  clamped DLSS output over the game texture that last frame's DLSS output went to, before
+  the game's SSGI/SSR reads it. `copy_resource` needs identical sizes and formats, and
+  barriers assume an SRV state, across a resize that reallocates every game texture.
+- **1.0.0-fg.8** (diagnostic):
+  - the copy checks size, format, depth and mips against the target and skips (logged)
+    on any mismatch;
+  - for 30 DLSS frames after each resize, every evaluate is logged (rects, the colour,
+    depth, velocity and output textures with sizes, feature switch, reset), along with
+    every lighting copy and the destruction of its target.
+  - Test 1: F11 twice with the defaults. Test 2, if it still hangs: the same with Advanced
+    > "Stabilise screen-space lighting" off, which turns off the clamp pass and the copy.
+
 ### Results
 
 | Question | Factory hook | Swap chain upgrade |

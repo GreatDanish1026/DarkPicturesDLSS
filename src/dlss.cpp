@@ -113,6 +113,11 @@ uint64_t g_histFrame = 0;      // frame g_hist was made in
 uint64_t g_histPatchedFrame = 0;
 uint64_t g_histPatches = 0;
 
+// Swap chain resizes (F11) hung the GPU with DLSS on (FINDINGS.md, runs 6-8): for
+// kTraceFrames DLSS frames after each resize, every evaluate and lighting copy is logged.
+constexpr uint32_t kTraceFrames = 30;
+uint32_t g_traceFrames = 0;
+
 std::string g_status = "waiting for the game's TAAU pass";
 uint64_t g_done = 0, g_failures = 0;
 constexpr uint32_t kCameraOnlyFrames = 2;  // after a reset, see Evaluate
@@ -812,6 +817,18 @@ Result Evaluate(const Frame& f) {
     feature->lastUsed = g_done;
     g_lastEvalFrame = f.frame;
     g_lastFeature = feature;
+    if (g_traceFrames) {
+        --g_traceFrames;
+        const auto d = [dev](resource r) { return dev->get_resource_desc(r).texture; };
+        const auto c = d(f.color), z = d(f.depth), v = d(f.velocity), o = d(f.output);
+        LOG("dlss: trace: frame %llu render %ux%u out %u,%u %ux%u%s%s | colour %llx %ux%u, depth %llx %ux%u, velocity "
+            "%llx %ux%u, output %llx %ux%u | ours %ux%u",
+            static_cast<unsigned long long>(f.frame), f.renderW, f.renderH, f.outX, f.outY, f.outW, f.outH,
+            switched ? ", feature switched" : "", reset ? ", reset" : "", static_cast<unsigned long long>(f.color.handle),
+            c.width, c.height, static_cast<unsigned long long>(f.depth.handle), z.width, z.height,
+            static_cast<unsigned long long>(f.velocity.handle), v.width, v.height,
+            static_cast<unsigned long long>(f.output.handle), o.width, o.height, g_texW, g_texH);
+    }
     SetStatus("running: %ux%u -> %ux%u", f.renderW, f.renderH, f.outW, f.outH);
 
     // Frame generation experiment: the same motion and depth, tagged for DLSS-G (does
@@ -907,6 +924,22 @@ bool PatchLightingHistory(command_list* cmd, resource texture, bool compute, uin
         g_histPatchedFrame == frame)
         return false;
     g_histPatchedFrame = frame;
+    // copy_resource needs identical size and format; never copy over a texture that isn't
+    // the one the clamped copy was made from.
+    const resource_desc ours = g_device->get_resource_desc(g_hist), theirs = g_device->get_resource_desc(texture);
+    if (ours.texture.width != theirs.texture.width || ours.texture.height != theirs.texture.height ||
+        ours.texture.format != theirs.texture.format || ours.texture.depth_or_layers != theirs.texture.depth_or_layers ||
+        ours.texture.levels != theirs.texture.levels) {
+        LOG("dlss: lighting history copy skipped at frame %llu: ours %ux%u format %u, the game's %ux%u format %u",
+            static_cast<unsigned long long>(frame), ours.texture.width, ours.texture.height,
+            static_cast<unsigned>(ours.texture.format), theirs.texture.width, theirs.texture.height,
+            static_cast<unsigned>(theirs.texture.format));
+        g_histOutput = {};
+        return false;
+    }
+    if (g_traceFrames)
+        LOG("dlss: trace: lighting history copy at frame %llu into %llx (%ux%u)", static_cast<unsigned long long>(frame),
+            static_cast<unsigned long long>(texture.handle), theirs.texture.width, theirs.texture.height);
     // The reader has the texture in SRV state for its stage; copy our clamped version over it.
     const resource_usage reading = compute ? resource_usage::shader_resource_non_pixel
                                            : resource_usage::shader_resource_pixel;
@@ -921,7 +954,14 @@ bool PatchLightingHistory(command_list* cmd, resource texture, bool compute, uin
     return true;
 }
 
+void OnSwapchainResize() {
+    g_traceFrames = kTraceFrames;
+    LOG("dlss: trace: swap chain resized; logging the next %u DLSS frames", kTraceFrames);
+}
+
 void OnDestroyResource(resource r) {
+    if (g_traceFrames && r.handle == g_histOutput.handle)
+        LOG("dlss: trace: lighting history target %llx destroyed", static_cast<unsigned long long>(r.handle));
     if (r.handle == g_histOutput.handle) g_histOutput = {};
     if (auto it = g_uavs.find(r.handle); it != g_uavs.end()) {
         if (g_device) g_device->destroy_resource_view(it->second);

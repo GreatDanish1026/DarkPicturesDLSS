@@ -69,6 +69,7 @@ uint64_t LightingHistoryPatches();
 void RequestCapture(bool afterNextCut = false);  // or 45 frames after the next camera cut
 std::string CaptureStatus();
 void OnDestroyResource(resource r);  // drops cached views of game textures
+void OnSwapchainResize();            // logs the next DLSS frames in detail (F11 hang)
 void Shutdown(device* dev);
 
 std::string Status();  // one line for the overlay and logs

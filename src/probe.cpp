@@ -745,6 +745,7 @@ void OnInitDevice(device* dev) {
 void OnInitSwapchain(swapchain* sc, bool resize) {
     std::lock_guard lock(g_mutex);
     Log("swap chain %s (%s)", resize ? "resized" : "created", ApiName(sc->get_device()->get_api()));
+    if (resize) dlss::OnSwapchainResize();
 }
 
 void UpdateSwapchainInfo(effect_runtime* rt) {
