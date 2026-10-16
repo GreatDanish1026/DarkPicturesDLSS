@@ -4,4 +4,4 @@
 #define QDLSS_VERSION_MAJOR 1
 #define QDLSS_VERSION_MINOR 0
 #define QDLSS_VERSION_PATCH 0
-#define QDLSS_VERSION "1.0.0-fg.8"  // frame generation spike branch
+#define QDLSS_VERSION "1.0.0-fg.9"  // frame generation spike branch

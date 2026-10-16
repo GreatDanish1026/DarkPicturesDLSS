@@ -865,6 +865,29 @@ Streamline is only initialised once a swap chain is being created (factory) or e
   - Test 1: F11 twice with the defaults. Test 2, if it still hangs: the same with Advanced
     > "Stabilise screen-space lighting" off, which turns off the clamp pass and the copy.
 
+### Run 9 (1.0.0-fg.8, 2026-10-16 14:45): stabilised lighting is the F11 trigger
+
+- With Advanced > "Stabilise screen-space lighting" **off**, F11 twice in gameplay with DLSS
+  on **didn't hang**. With it on, all four earlier F11 tests hung.
+- The trace shows what's unusual after the resize back up: in probe frame 1208 the game
+  dispatched its TAAU **twice before one present**. First at 77% (DLSS replaced it: output
+  `...60ed0` 3840x1664), then at 100% ("not upscaling", the game's own TAA ran), the frame
+  where the game writes r.ScreenPercentage back to 100 before we force 77 again. Runs 6-8
+  hung ~4 s after that same 100% frame.
+- The lighting copy assumes one DLSS frame per present. At the next frame's first lighting
+  pass it copies the clamped image over the texture DLSS wrote last frame, with barriers
+  that assume that texture is in its SRV state. After the extra 100% rendering, UE's
+  render-target pool can have handed that texture out again. The copy then lands on a
+  texture in another state or in use, which fits the hang. (fg.8's size check alone
+  wouldn't catch it: the size and format can still match.)
+- **1.0.0-fg.9:**
+  - any TAAU dispatch that falls back to the game's TAA cancels the pending lighting copy
+    (`CancelLightingHistory`, called from every fallback);
+  - a swap chain resize cancels it and holds it off for 30 DLSS frames.
+  - The clamp pass and brightness counters still run; only the copy over the game's
+    texture is skipped.
+  - Not yet confirmed: F11 twice with stabilise on.
+
 ### Results
 
 | Question | Factory hook | Swap chain upgrade |

@@ -1252,6 +1252,7 @@ std::string g_lastSkipWhy;
 uint64_t g_skipCount = 0;
 
 void LogSkip(const std::string& why) {
+    dlss::CancelLightingHistory();
     ++g_skipCount;
     // Every change of reason, and every 600th repeat, so cut frames can't hide.
     if (why != g_lastSkipWhy || g_skipCount % 600 == 0)

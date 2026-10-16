@@ -117,6 +117,13 @@ uint64_t g_histPatches = 0;
 // kTraceFrames DLSS frames after each resize, every evaluate and lighting copy is logged.
 constexpr uint32_t kTraceFrames = 30;
 uint32_t g_traceFrames = 0;
+// The lighting history copy assumes one DLSS frame per present, with last frame's output
+// texture untouched until the lighting reads it. After a swap chain resize the game renders
+// a frame twice (77% with DLSS, then 100% with its own TAA) before one present, and with the
+// copy on that hung the GPU (FINDINGS.md, run 9). So the copy is cancelled when a TAAU
+// dispatch falls back after DLSS ran, and held off for kHistHoldFrames DLSS frames after a resize.
+constexpr uint32_t kHistHoldFrames = 30;
+uint32_t g_histHoldFrames = 0;
 
 std::string g_status = "waiting for the game's TAAU pass";
 uint64_t g_done = 0, g_failures = 0;
@@ -893,7 +900,8 @@ Result Evaluate(const Frame& f) {
             g_lumaAge[slot] = age;
             g_lumaClamp[slot] = g_options.clampLightingHistory;
             g_lumaPreExposure[slot] = f.preExposure;
-            if (g_options.clampLightingHistory) {
+            if (g_histHoldFrames) --g_histHoldFrames;
+            else if (g_options.clampLightingHistory) {
                 g_histOutput = f.output;
                 g_histFrame = f.frame;
             }
@@ -956,7 +964,16 @@ bool PatchLightingHistory(command_list* cmd, resource texture, bool compute, uin
 
 void OnSwapchainResize() {
     g_traceFrames = kTraceFrames;
-    LOG("dlss: trace: swap chain resized; logging the next %u DLSS frames", kTraceFrames);
+    g_histHoldFrames = kHistHoldFrames;
+    g_histOutput = {};
+    LOG("dlss: swap chain resized: lighting history copy off for %u DLSS frames; tracing them", kHistHoldFrames);
+}
+
+void CancelLightingHistory() {
+    if (!g_histOutput.handle) return;
+    if (g_traceFrames)
+        LOG("dlss: trace: lighting history copy cancelled (a TAAU dispatch fell back after DLSS)");
+    g_histOutput = {};
 }
 
 void OnDestroyResource(resource r) {
