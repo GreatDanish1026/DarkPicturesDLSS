@@ -15,6 +15,7 @@ using namespace reshade::api;
 struct Frame {
     command_list* cmd = nullptr;
     resource color, depth, velocity, output;  // game textures, already in SRV / UAV state
+    resource exposure;                         // TAAU t0: UE's 1x1 eye adaptation (exposure in .r), may be 0
     uint32_t renderW = 0, renderH = 0;         // render view rect (top-left 0,0)
     uint32_t outX = 0, outY = 0, outW = 0, outH = 0;  // output view rect
     float jitterX = 0, jitterY = 0;            // render pixels, from the TAA constants
@@ -39,6 +40,7 @@ struct Options {
     bool ignoreVelocity = false;  // camera reprojection only: tests the game velocity decode
     bool clampLightingHistory = true;  // give SSGI/SSR a clamped copy of the DLSS output
     bool passPreExposure = true;  // tell DLSS the game's per-frame pre-exposure
+    bool gameExposure = true;  // give DLSS the game's eye adaptation instead of its auto exposure (recreates)
     bool logBrightness = true;  // one log line per DLSS frame: input / DLSS / clamped luma
 };
 extern Options g_options;

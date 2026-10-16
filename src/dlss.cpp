@@ -63,9 +63,10 @@ NVSDK_NGX_Parameter* g_params = nullptr;
 struct FeatureKey {
     uint32_t renderW = 0, renderH = 0, outW = 0, outH = 0;
     bool jittered = false;
+    bool autoExposure = true;  // DLSS's own exposure; false = the game's eye adaptation texture
     bool operator==(const FeatureKey& o) const {
         return renderW == o.renderW && renderH == o.renderH && outW == o.outW && outH == o.outH &&
-               jittered == o.jittered;
+               jittered == o.jittered && autoExposure == o.autoExposure;
     }
     bool operator!=(const FeatureKey& o) const { return !(*this == o); }
 };
@@ -600,7 +601,8 @@ void CreateFeature(command_queue* queue, const FeatureKey& key) {
     cp.Feature.InTargetHeight = key.outH;
     cp.Feature.InPerfQualityValue = QualityFor(float(key.renderW) / float(key.outW));
     cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
-                              NVSDK_NGX_DLSS_Feature_Flags_DepthInverted | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
+                              NVSDK_NGX_DLSS_Feature_Flags_DepthInverted |
+                              (key.autoExposure ? NVSDK_NGX_DLSS_Feature_Flags_AutoExposure : 0) |
                               (key.jittered ? NVSDK_NGX_DLSS_Feature_Flags_MVJittered : 0);
     command_list* cmd = queue->get_immediate_command_list();
     auto list = reinterpret_cast<ID3D12GraphicsCommandList*>(cmd->get_native());
@@ -614,9 +616,9 @@ void CreateFeature(command_queue* queue, const FeatureKey& key) {
     }
     g_lastFeature = nullptr;  // push_back may move the others
     g_features.push_back({key, handle, g_done});
-    LOG("dlss: feature created %ux%u -> %ux%u (quality mode %d%s), %zu cached", key.renderW, key.renderH, key.outW,
+    LOG("dlss: feature created %ux%u -> %ux%u (quality mode %d%s, %s), %zu cached", key.renderW, key.renderH, key.outW,
         key.outH, static_cast<int>(cp.Feature.InPerfQualityValue), key.jittered ? ", jittered MVs" : "",
-        g_features.size());
+        key.autoExposure ? "auto exposure" : "game exposure", g_features.size());
     SetStatus("ready: %ux%u -> %ux%u", key.renderW, key.renderH, key.outW, key.outH);
 }
 
@@ -646,6 +648,7 @@ Result Evaluate(const Frame& f) {
     key.outW = f.outW;
     key.outH = f.outH;
     key.jittered = g_options.mvJittered;
+    key.autoExposure = !(g_options.gameExposure && f.exposure.handle);
     Feature* feature = FindFeature(key);
     if (!feature) {
         g_wanted = key;  // created at the next present; the game's TAAU runs this frame
@@ -776,6 +779,9 @@ Result Evaluate(const Frame& f) {
     // UE scales scene colour by View.PreExposure, which follows the eye adaptation and can
     // jump ~1000x at a cut. Without it DLSS blends history from another exposure scale.
     e.InPreExposure = g_options.passPreExposure ? f.preExposure : 1.0f;
+    // UE's eye adaptation (1x1 RGBA32F, exposure in .r), as NVIDIA's UE plugin passes it
+    // with auto exposure off.
+    if (!key.autoExposure) e.pInExposureTexture = reinterpret_cast<ID3D12Resource*>(f.exposure.handle);
     const NVSDK_NGX_Result r = NGX_D3D12_EVALUATE_DLSS_EXT(list, feature->handle, g_params, &e);
     cmd->barrier(2, ours, srv, uav);
     if (NVSDK_NGX_FAILED(r)) {

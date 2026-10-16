@@ -434,6 +434,25 @@ Frame dump 1705 (0.5.10, kick close-up, 85 frames after a reset that reached DLS
 - **0.5.20** also captures the DLSS output (`output0/1`). The analyser downsamples it and
   compares it with the input per region (`_outdiff.png`), to show where and how the
   output departs from the frame it was made from.
+- **"Yah!" pair with output (frames 1680-1681):** the DLSS output departs from its
+  input in a few clear ways:
+  - The input has a hard shadow across the lower face, but the output shows the face
+    fully lit (region mean 0.027 in vs 0.127 out).
+  - The arm sits in an older position, with wall texture streaked through the dark
+    forest behind it.
+  - The bright wall and the lit areas match (|d| ~0.08).
+  
+  The motion vectors are verified correct (0.117 reprojection error vs 0.30 camera-only),
+  and 0.5.3 confirmed their sign in fast pans. So DLSS is over-trusting history where the
+  image is dark. That's typical of a wrong exposure for HDR input: dark differences get
+  compressed below DLSS's rejection threshold.
+- **0.5.21:** "Use the game's exposure, not DLSS auto exposure" (on by default). DLSS
+  gets the TAAU's t0, UE's 1x1 RGBA32F eye adaptation (exposure in .r), as
+  `pInExposureTexture`, and the feature is created without `AutoExposure`. This is what
+  NVIDIA's UE plugin does with auto exposure off. It's only used when t0 is 1x1
+  RGBA32F. The feature key includes the exposure mode, so toggling recreates the
+  feature. Test: in the luma log for "Yah!", the clamp cut should stay near 0% instead
+  of climbing to ~30%.
 
 ### Crash report from a probe 0.3.1 session
 

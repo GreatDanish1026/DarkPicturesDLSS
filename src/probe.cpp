@@ -1128,6 +1128,7 @@ bool BuildDlssFrame(command_list* cmd, const ContextState& st, dlss::Frame& f, s
     const HeapEntry* depth = ResolveTableSlot(dev, st, true, Slot::srv, 2);
     const HeapEntry* velocity = ResolveTableSlot(dev, st, true, Slot::srv, 3);
     const HeapEntry* output = ResolveTableSlot(dev, st, true, Slot::uav, 0);
+    const HeapEntry* exposure = ResolveTableSlot(dev, st, true, Slot::srv, 0);
     for (const HeapEntry* e : {color, depth, velocity, output})
         if (!e || !e->res || !IsLive(e->res)) {
             why = "a TAAU input or output could not be resolved";
@@ -1148,6 +1149,11 @@ bool BuildDlssFrame(command_list* cmd, const ContextState& st, dlss::Frame& f, s
     f.depth = {depth->res};
     f.velocity = {velocity->res};
     f.output = {output->res};
+    if (exposure && exposure->res && IsLive(exposure->res)) {
+        const auto d = dev->get_resource_desc({exposure->res});
+        if (d.texture.width == 1 && d.texture.height == 1 && d.texture.format == format::r32g32b32a32_float)
+            f.exposure = {exposure->res};  // UE's eye adaptation
+    }
     f.renderW = static_cast<uint32_t>(row(cb0, 27)[0]);
     f.renderH = static_cast<uint32_t>(row(cb0, 27)[1]);
     f.outX = static_cast<uint32_t>(row(cb0, 24)[0]);
@@ -1551,6 +1557,7 @@ void DrawOverlay(effect_runtime*) {
     ImGui::SameLine();
     ImGui::Text("(%llu copies)", static_cast<unsigned long long>(dlss::LightingHistoryPatches()));
     ImGui::Checkbox("Pass the game's pre-exposure to DLSS", &dlss::g_options.passPreExposure);
+    ImGui::Checkbox("Use the game's exposure, not DLSS auto exposure", &dlss::g_options.gameExposure);
     ImGui::Checkbox("Log brightness every frame (input / DLSS / clamped luma)", &dlss::g_options.logBrightness);
 
     // Record option changes, so a test run can be read back from the log.
@@ -1559,10 +1566,11 @@ void DrawOverlay(effect_runtime*) {
     if (o.enabled != logged.enabled || o.flipJitterX != logged.flipJitterX || o.flipJitterY != logged.flipJitterY ||
         o.mvJittered != logged.mvJittered || o.invertMotion != logged.invertMotion ||
         o.ignoreVelocity != logged.ignoreVelocity || o.clampLightingHistory != logged.clampLightingHistory ||
-        o.passPreExposure != logged.passPreExposure || o.logBrightness != logged.logBrightness) {
-        Log("options at frame %llu: DLSS %s, flip jitter X %d Y %d, MVs jittered %d, invert MVs %d, ignore velocity %d, clamp lighting history %d, pre-exposure %d, log brightness %d",
+        o.passPreExposure != logged.passPreExposure || o.gameExposure != logged.gameExposure ||
+        o.logBrightness != logged.logBrightness) {
+        Log("options at frame %llu: DLSS %s, flip jitter X %d Y %d, MVs jittered %d, invert MVs %d, ignore velocity %d, clamp lighting history %d, pre-exposure %d, game exposure %d, log brightness %d",
             static_cast<unsigned long long>(g_frame), o.enabled ? "on" : "off", o.flipJitterX, o.flipJitterY,
-            o.mvJittered, o.invertMotion, o.ignoreVelocity, o.clampLightingHistory, o.passPreExposure, o.logBrightness);
+            o.mvJittered, o.invertMotion, o.ignoreVelocity, o.clampLightingHistory, o.passPreExposure, o.gameExposure, o.logBrightness);
         logged = o;
     }
     if (g_api == device_api::d3d12)
