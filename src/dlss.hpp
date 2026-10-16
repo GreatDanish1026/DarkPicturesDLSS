@@ -37,6 +37,7 @@ struct Options {
     bool invertMotion = false;  // DLSS MV scale -1: tests the motion vector sign
     bool ignoreVelocity = false;  // camera reprojection only: tests the game velocity decode
     bool clampLightingHistory = true;  // give SSGI/SSR a clamped copy of the DLSS output
+    bool logBrightness = true;  // one log line per DLSS frame: input / DLSS / clamped luma
 };
 extern Options g_options;
 

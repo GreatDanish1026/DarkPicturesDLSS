@@ -1531,19 +1531,21 @@ void DrawOverlay(effect_runtime*) {
     ImGui::Checkbox("Motion vectors include jitter", &dlss::g_options.mvJittered);
     ImGui::Checkbox("Invert motion vectors (test)", &dlss::g_options.invertMotion);
     ImGui::Checkbox("Ignore game velocity, camera motion only (test)", &dlss::g_options.ignoreVelocity);
-    ImGui::Checkbox("Clamp lighting history (keeps SSGI/SSR stable)", &dlss::g_options.clampLightingHistory);
+    ImGui::Checkbox("Clamp lighting history for SSGI/SSR (test)", &dlss::g_options.clampLightingHistory);
     ImGui::SameLine();
     ImGui::Text("(%llu copies)", static_cast<unsigned long long>(dlss::LightingHistoryPatches()));
+    ImGui::Checkbox("Log brightness every frame (input / DLSS / clamped luma)", &dlss::g_options.logBrightness);
 
     // Record option changes, so a test run can be read back from the log.
     static dlss::Options logged = dlss::g_options;
     const dlss::Options& o = dlss::g_options;
     if (o.enabled != logged.enabled || o.flipJitterX != logged.flipJitterX || o.flipJitterY != logged.flipJitterY ||
         o.mvJittered != logged.mvJittered || o.invertMotion != logged.invertMotion ||
-        o.ignoreVelocity != logged.ignoreVelocity || o.clampLightingHistory != logged.clampLightingHistory) {
-        Log("options at frame %llu: DLSS %s, flip jitter X %d Y %d, MVs jittered %d, invert MVs %d, ignore velocity %d, clamp lighting history %d",
+        o.ignoreVelocity != logged.ignoreVelocity || o.clampLightingHistory != logged.clampLightingHistory ||
+        o.logBrightness != logged.logBrightness) {
+        Log("options at frame %llu: DLSS %s, flip jitter X %d Y %d, MVs jittered %d, invert MVs %d, ignore velocity %d, clamp lighting history %d, log brightness %d",
             static_cast<unsigned long long>(g_frame), o.enabled ? "on" : "off", o.flipJitterX, o.flipJitterY,
-            o.mvJittered, o.invertMotion, o.ignoreVelocity, o.clampLightingHistory);
+            o.mvJittered, o.invertMotion, o.ignoreVelocity, o.clampLightingHistory, o.logBrightness);
         logged = o;
     }
     if (g_api == device_api::d3d12)

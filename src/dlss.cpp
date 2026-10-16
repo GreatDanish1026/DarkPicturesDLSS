@@ -264,6 +264,64 @@ void CollectStats(device* dev, uint32_t slot) {
     g_statsDepthMin = 0xffffffffu;
 }
 
+// ---- brightness diagnostics: the clamp pass measures the luma of the input colour, the
+// DLSS output and the clamped copy (see Stats in dlss_clamp.hlsl) into a ring like the one
+// above, logged one line per frame to show where a blow-up starts.
+
+resource g_luma[kStatsRing] = {}, g_lumaReadback[kStatsRing] = {};
+resource_view g_lumaUav[kStatsRing] = {};
+bool g_lumaPending[kStatsRing] = {};
+uint64_t g_lumaFrame[kStatsRing] = {};  // probe frame, per slot
+uint32_t g_lumaAge[kStatsRing] = {};    // frames since the last reset, per slot
+bool g_lumaClamp[kStatsRing] = {};      // clamped copy handed to the lighting that frame
+uint64_t g_patchedRing[8] = {};         // frames whose lighting history was patched (frame % 8)
+
+bool CreateLuma(device* dev) {
+    for (uint32_t i = 0; i < kStatsRing; ++i) {
+        const resource_desc gpu(kStatsWords * 4, memory_heap::default_,
+                                resource_usage::unordered_access | resource_usage::copy_source | resource_usage::copy_dest);
+        const resource_desc cpu(kStatsWords * 4, memory_heap::readback, resource_usage::copy_dest);
+        if (!dev->create_resource(gpu, nullptr, resource_usage::unordered_access, &g_luma[i]) ||
+            !dev->create_resource_view(g_luma[i], resource_usage::unordered_access,
+                                       resource_view_desc(format::r32_uint, 0, kStatsWords), &g_lumaUav[i]) ||
+            !dev->create_resource(cpu, nullptr, resource_usage::copy_dest, &g_lumaReadback[i]))
+            return false;
+    }
+    return true;
+}
+
+void DestroyLuma(device* dev) {
+    for (uint32_t i = 0; i < kStatsRing; ++i) {
+        if (g_lumaUav[i].handle) dev->destroy_resource_view(g_lumaUav[i]);
+        if (g_luma[i].handle) dev->destroy_resource(g_luma[i]);
+        if (g_lumaReadback[i].handle) dev->destroy_resource(g_lumaReadback[i]);
+        g_lumaUav[i] = {};
+        g_luma[i] = g_lumaReadback[i] = {};
+        g_lumaPending[i] = false;
+    }
+}
+
+void CollectLuma(device* dev, uint32_t slot) {
+    if (!g_lumaPending[slot]) return;
+    void* p = nullptr;
+    if (!dev->map_buffer_region(g_lumaReadback[slot], 0, kStatsWords * 4, map_access::read_only, &p) || !p) return;
+    uint32_t s[kStatsWords];
+    memcpy(s, p, sizeof(s));
+    dev->unmap_buffer_region(g_lumaReadback[slot]);
+    g_lumaPending[slot] = false;
+    if (!g_options.logBrightness || !s[0]) return;
+    float maxima[3];
+    memcpy(maxima, &s[4], sizeof(maxima));
+    const double n = double(s[0]) * 64.0;  // kSumScale in dlss_clamp.hlsl
+    const uint64_t f = g_lumaFrame[slot];
+    // "lit" says whether the lighting read the clamped copy in the next frame.
+    const char* lit = !g_lumaClamp[slot] ? "off" : g_patchedRing[(f + 1) % 8] == f + 1 ? "yes" : "no";
+    LOG("luma f%llu age %u: in %.3f max %.1f | dlss %.3f max %.1f | clamped %.3f max %.1f | cut %.1f%% "
+        "hot %.2f%%/%.2f%% (dlss/in) nonfinite %u/%u (dlss/in) lit %s",
+        static_cast<unsigned long long>(f), g_lumaAge[slot], s[1] / n, maxima[0], s[2] / n, maxima[1], s[3] / n,
+        maxima[2], 100.0 * s[7] / s[0], 100.0 * s[10] / s[0], 100.0 * s[11] / s[0], s[9], s[8], lit);
+}
+
 bool CreatePipeline(device* dev) {
     pipeline_layout_param params[3];
     params[0] = pipeline_layout_param(constant_range{0, 0, 0, kConstants, shader_stage::compute});
@@ -295,13 +353,14 @@ bool CreatePipeline(device* dev) {
         return false;
     }
 
-    // Clamp pass (dlss_clamp.hlsl): b0 constants, t0 input colour, u0 DLSS output, u1 ours.
+    // Clamp pass (dlss_clamp.hlsl): b0 constants, t0 input colour, u0 DLSS output, u1 ours,
+    // u2 brightness counters.
     pipeline_layout_param clampParams[3];
     clampParams[0] = pipeline_layout_param(constant_range{0, 0, 0, 4, shader_stage::compute});
     descriptor_range clampSrv = srvs;
     clampSrv.count = 1;
     descriptor_range clampUav = uavs;
-    clampUav.count = 2;
+    clampUav.count = 3;
     clampParams[1].type = pipeline_layout_param_type::push_descriptors_with_ranges;
     clampParams[1].descriptor_table = {1, &clampSrv};
     clampParams[2].type = pipeline_layout_param_type::push_descriptors_with_ranges;
@@ -315,7 +374,7 @@ bool CreatePipeline(device* dev) {
         SetStatus("could not create the history clamp pipeline");
         return false;
     }
-    return CreateStats(dev);
+    return CreateStats(dev) && CreateLuma(dev);
 }
 
 // ---- clamped lighting history (see dlss_clamp.hlsl) --------------------------------
@@ -572,26 +631,41 @@ Result Evaluate(const Frame& f) {
     g_lastFeature = feature;
     SetStatus("running: %ux%u -> %ux%u", f.renderW, f.renderH, f.outW, f.outH);
 
-    // 3. Clamped copy of the DLSS output for next frame's SSGI/SSR (PatchLightingHistory).
+    // 3. Clamped copy of the DLSS output for next frame's SSGI/SSR (PatchLightingHistory),
+    // and brightness counters. The pass runs for the counters even with the clamp off;
+    // the copy is then just not handed to the lighting.
     g_histOutput = {};
-    if (g_options.clampLightingHistory && f.outX == 0 && f.outY == 0) {
+    CollectLuma(dev, slot);
+    if ((g_options.clampLightingHistory || g_options.logBrightness) && f.outX == 0 && f.outY == 0) {
         const resource_desc outDesc = dev->get_resource_desc(f.output);
         const resource_view colorSrv = GameSrv(dev, f.color, format::r16g16b16a16_float);
         const resource_view outUav = GameUav(dev, f.output, format::r16g16b16a16_float);
         if (outDesc.texture.format == format::r16g16b16a16_float && colorSrv.handle && outUav.handle &&
             EnsureHistory(dev, outDesc.texture.width, outDesc.texture.height)) {
+            cmd->barrier(g_luma[slot], resource_usage::unordered_access, resource_usage::copy_dest);
+            cmd->copy_buffer_region(g_statsZero, 0, g_luma[slot], 0, kStatsWords * 4);
+            cmd->barrier(g_luma[slot], resource_usage::copy_dest, resource_usage::unordered_access);
             cmd->barrier(f.output, resource_usage::unordered_access, resource_usage::unordered_access);  // DLSS done
             const float clampConstants[4] = {float(f.outW), float(f.outH), float(f.renderW), float(f.renderH)};
             cmd->bind_pipeline(pipeline_stage::compute_shader, g_clampPso);
             cmd->push_constants(shader_stage::compute, g_clampLayout, 0, 0, 4, clampConstants);
             cmd->push_descriptors(shader_stage::compute, g_clampLayout, 1,
                                   descriptor_table_update{{}, 0, 0, 1, descriptor_type::shader_resource_view, &colorSrv});
-            const resource_view clampUavs[2] = {outUav, g_histUav};
+            const resource_view clampUavs[3] = {outUav, g_histUav, g_lumaUav[slot]};
             cmd->push_descriptors(shader_stage::compute, g_clampLayout, 2,
-                                  descriptor_table_update{{}, 0, 0, 2, descriptor_type::unordered_access_view, clampUavs});
+                                  descriptor_table_update{{}, 0, 0, 3, descriptor_type::unordered_access_view, clampUavs});
             cmd->dispatch((f.outW + 7) / 8, (f.outH + 7) / 8, 1);
-            g_histOutput = f.output;
-            g_histFrame = f.frame;
+            cmd->barrier(g_luma[slot], resource_usage::unordered_access, resource_usage::copy_source);
+            cmd->copy_buffer_region(g_luma[slot], 0, g_lumaReadback[slot], 0, kStatsWords * 4);
+            cmd->barrier(g_luma[slot], resource_usage::copy_source, resource_usage::unordered_access);
+            g_lumaPending[slot] = true;
+            g_lumaFrame[slot] = f.frame;
+            g_lumaAge[slot] = age;
+            g_lumaClamp[slot] = g_options.clampLightingHistory;
+            if (g_options.clampLightingHistory) {
+                g_histOutput = f.output;
+                g_histFrame = f.frame;
+            }
         }
     }
     return Result::done;
@@ -611,6 +685,7 @@ bool PatchLightingHistory(command_list* cmd, resource texture, bool compute, uin
     cmd->barrier(2, both, before, copying);
     cmd->copy_resource(g_hist, texture);
     cmd->barrier(2, both, copying, before);
+    g_patchedRing[frame % 8] = frame;
     if (++g_histPatches == 1) LOG("dlss: first clamped lighting history copy (frame %llu)", static_cast<unsigned long long>(frame));
     return true;
 }
@@ -646,6 +721,7 @@ void Shutdown(device* dev) {
     g_clampLayout = {};
     DestroyTextures(dev);
     DestroyStats(dev);
+    DestroyLuma(dev);
     if (g_pso.handle) dev->destroy_pipeline(g_pso);
     if (g_layout.handle) dev->destroy_pipeline_layout(g_layout);
     g_pso = {};

@@ -318,6 +318,15 @@ Frame dump 1705 (0.5.10, kick close-up, 85 frames after a reset that reached DLS
   adds last frame's light to the very input it clamps against. It only removes DLSS's
   own accumulation from the loop. Open question: does the blow-up live in DLSS's
   internal history or in the game's buffers (SSGI/SSR denoiser histories)?
+- **0.5.13 brightness log:** the clamp pass also measures luma on every 4th output pixel
+  in each direction. It logs one line per DLSS frame:
+  `luma f<frame> age <frames since reset>: in <mean> max | dlss <mean> max | clamped
+  <mean> max | cut <% of samples the clamp lowered by >20%> hot <% luma > 16, dlss/in>
+  nonfinite <dlss/in> lit <yes|no|off>`. Means clip each sample at 64. "lit" says whether
+  the lighting read the clamped copy in the next frame. Reading it: if `dlss` climbs
+  first while `in` stays flat, DLSS's own history is blowing up. If `in` climbs first,
+  the energy comes through the game's lighting. Non-finite counts flag NaN/Inf.
+  Overlay: "Log brightness every frame" (on by default).
 
 ### Crash report from a probe 0.3.1 session
 
