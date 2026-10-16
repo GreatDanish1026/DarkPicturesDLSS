@@ -1039,3 +1039,17 @@ issues).
 
 Same code as 0.6.1, with the version bumped. It ships as `QuarryDLSS.addon64` with the
 README, LICENSE and THIRD_PARTY_NOTICES.txt. `nvngx_dlss.dll` isn't included.
+
+### 1.1.0: frame generation, Ultra Quality and F11 fixes (2026-10-16)
+
+The `fg-spike` branch as of 1.0.0-fg.9, merged into main, with the version set to 1.1.0.
+Changes from 1.0.0 (details under "Frame Generation spike"):
+
+- **DLSS Frame Generation** through Streamline 2.14.1: Off / 2x / 3x / 4x / Dynamic on the
+  main panel, Off by default. Streamline is only loaded when it's on at launch.
+- **Ultra Quality (77%) now runs DLSS.** It never did before: it uses TAAU permutation
+  `2f606fcaa114ea67`, and NGX rejects its `UltraQuality` mode, so it's created as Quality.
+- **F11 no longer hangs the GPU with DLSS on.** The stabilised-lighting copy is cancelled
+  after any TAAU fallback and held off for 30 DLSS frames after a swap chain resize.
+- The release zip bundles the NVIDIA runtime: `nvngx_dlss.dll`, `nvngx_dlssg.dll` and the
+  five Streamline DLLs, with their licence texts (`build.ps1 -Package`).
