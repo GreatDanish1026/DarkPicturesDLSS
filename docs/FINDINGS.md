@@ -703,6 +703,13 @@ Streamline is only initialised once a swap chain is being created (factory) or e
   frame generation preset parameter either. The frame generation model comes from the
   driver, or from the NVIDIA App's override as above.
 
+- **1.0.0-fg.3:** the overlay checkbox and frame-count slider become one "Frame
+  generation" choice: Off / 2x / 3x / 4x / Dynamic (`DLSSGMode::eDynamic`, where
+  Streamline picks the multiplier to reach the refresh rate; it falls back to 2x when
+  `bIsDynamicMFGSupported` is false). It's saved as `FrameGenerationMode=<name>`, and
+  fg.1/fg.2's `FrameGenerationOn` / `FrameGenerationFrames` are migrated. Off now sets
+  `eRetainResourcesWhenOff`, so switching back on doesn't stutter.
+
 ### Results
 
 | Question | Factory hook | Swap chain upgrade |

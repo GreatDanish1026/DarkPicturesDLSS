@@ -1643,8 +1643,7 @@ void DrawDiagnostics() {
 // DLSS-G through Streamline (fg.cpp): off unless a hook is chosen; the hook needs a restart.
 void DrawFrameGeneration() {
     auto& o = fg::g_options;
-    static const char* hooks[] = {"Off", "Factory hook (game -> Streamline -> ReShade)",
-                                  "Swap chain upgrade (game -> ReShade -> Streamline)"};
+    static const char* hooks[] = {"Off", "Factory hook (recommended)", "Swap chain upgrade (untested)"};
     int hook = static_cast<int>(o.hook);
     bool changed = false;
     if (ImGui::Combo("Streamline hook (restart the game)", &hook, hooks, 3)) {
@@ -1653,19 +1652,23 @@ void DrawFrameGeneration() {
     }
     ImGui::TextWrapped("Needs sl.interposer.dll, sl.common.dll, sl.dlss_g.dll, sl.reflex.dll, sl.pcl.dll and "
                        "nvngx_dlssg.dll next to the game exe, and hardware-accelerated GPU scheduling.");
-    changed |= ImGui::Checkbox("Generate frames", &o.generate);
-    int frames = static_cast<int>(o.framesToGenerate);
-    if (ImGui::SliderInt("Generated frames per rendered frame", &frames, 1, 3)) {
-        o.framesToGenerate = static_cast<uint32_t>(frames);
+    const char* modes[static_cast<int>(fg::Mode::count)];
+    for (int i = 0; i < static_cast<int>(fg::Mode::count); ++i) modes[i] = fg::ModeName(static_cast<fg::Mode>(i));
+    int mode = static_cast<int>(o.mode);
+    if (ImGui::Combo("Frame generation", &mode, modes, static_cast<int>(fg::Mode::count))) {
+        o.mode = static_cast<fg::Mode>(mode);
         changed = true;
     }
+    ImGui::TextWrapped("2x, 3x, 4x: each rendered frame plus 1-3 generated ones. Dynamic: Streamline picks the "
+                       "multiplier to reach your refresh rate. The frame generation model is the driver's (or the "
+                       "NVIDIA App override's); DLSS-G has no presets to pick.");
     changed |= ImGui::Checkbox("Reflex low latency", &o.reflex);
     changed |= ImGui::Checkbox("Streamline copies motion/depth when tagged", &o.copyTags);
     ImGui::TextWrapped("Status: %s", fg::Status().c_str());
     ImGui::TextWrapped("Pacing: %s", fg::Pacing().c_str());
     if (changed) {
-        Log("frame generation options at frame %llu: hook %d, generate %d, %u frames, reflex %d, copy tags %d",
-            static_cast<unsigned long long>(g_frame), static_cast<int>(o.hook), o.generate, o.framesToGenerate, o.reflex,
+        Log("frame generation options at frame %llu: hook %d, mode %s, reflex %d, copy tags %d",
+            static_cast<unsigned long long>(g_frame), static_cast<int>(o.hook), fg::ModeName(o.mode), o.reflex,
             o.copyTags);
         fg::SaveSettings();
     }

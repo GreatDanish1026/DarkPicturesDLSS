@@ -328,14 +328,31 @@ void ApplyOptions() {
     reflex.mode = g_options.reflex ? sl::ReflexMode::eLowLatency : sl::ReflexMode::eOff;
     Check(g_sl.reflexSetOptions(reflex), "slReflexSetOptions");
     sl::DLSSGState state;
-    if (Check(g_sl.dlssgGetState(Viewport(), state, nullptr), "slDLSSGGetState"))
+    bool dynamicSupported = false;
+    if (Check(g_sl.dlssgGetState(Viewport(), state, nullptr), "slDLSSGGetState")) {
         g_maxFrames = std::max(1u, state.numFramesToGenerateMax);
+        dynamicSupported = state.bIsDynamicMFGSupported == sl::Boolean::eTrue;
+    }
+    Mode mode = g_options.mode;
+    if (mode == Mode::dynamic && !dynamicSupported) {
+        LOG("fg: dynamic frame generation is not supported here (needs multi-frame generation and driver 595.41+), "
+            "using 2x");
+        mode = Mode::x2;
+    }
     sl::DLSSGOptions o;
-    o.mode = g_options.generate ? sl::DLSSGMode::eOn : sl::DLSSGMode::eOff;
-    o.numFramesToGenerate = std::clamp(g_options.framesToGenerate, 1u, g_maxFrames);
+    o.mode = mode == Mode::off       ? sl::DLSSGMode::eOff
+             : mode == Mode::dynamic ? sl::DLSSGMode::eDynamic
+                                     : sl::DLSSGMode::eOn;
+    const uint32_t frames = mode == Mode::x4 ? 3u : mode == Mode::x3 ? 2u : 1u;  // ignored in dynamic mode
+    o.numFramesToGenerate = std::clamp(frames, 1u, g_maxFrames);
+    o.dynamicTargetFrameRate = 0.0f;  // the display's refresh rate
+    // Off is a live toggle here: keep the memory so turning it back on doesn't stutter.
+    o.flags = sl::DLSSGFlags::eRetainResourcesWhenOff;
     if (Check(g_sl.dlssgSetOptions(Viewport(), o), "slDLSSGSetOptions"))
-        LOG("fg: DLSS-G %s, %u generated per rendered frame (max %u), Reflex %s", g_options.generate ? "on" : "off",
-            o.numFramesToGenerate, g_maxFrames, g_options.reflex ? "low latency" : "off");
+        LOG("fg: DLSS-G %s (%u generated per rendered frame unless off/dynamic, max %u, dynamic %s), Reflex %s",
+            ModeName(mode), o.numFramesToGenerate, g_maxFrames, dynamicSupported ? "supported" : "not supported",
+            g_options.reflex ? "low latency" : "off");
+    if (mode != g_options.mode) SetStatus("dynamic frame generation is not supported here, using 2x");
 }
 
 void Marker(sl::PCLMarker m, const sl::FrameToken& t) { Check(g_sl.pclSetMarker(m, t), sl::getPCLMarkerAsStr(m)); }
@@ -748,25 +765,37 @@ sl::float3 Normalize(float x, float y, float z) {
 
 }  // namespace
 
+const char* ModeName(Mode m) {
+    static const char* names[] = {"Off", "2x", "3x", "4x", "Dynamic"};
+    return m >= Mode::off && m < Mode::count ? names[static_cast<int>(m)] : "?";
+}
+
 void LoadSettings() {
     int hook = 0;
     if (reshade::get_config_value(nullptr, kSection, "FrameGeneration", hook) && hook >= 0 && hook <= 2)
         g_options.hook = static_cast<Hook>(hook);
-    reshade::get_config_value(nullptr, kSection, "FrameGenerationOn", g_options.generate);
-    unsigned int frames = g_options.framesToGenerate;
-    if (reshade::get_config_value(nullptr, kSection, "FrameGenerationFrames", frames) && frames >= 1 && frames <= 3)
-        g_options.framesToGenerate = frames;
+    char name[16] = {};
+    size_t size = sizeof(name);
+    bool on = true;
+    unsigned int frames = 1;
+    if (reshade::get_config_value(nullptr, kSection, "FrameGenerationMode", name, &size)) {
+        for (int i = 0; i < static_cast<int>(Mode::count); ++i)
+            if (strcmp(name, ModeName(static_cast<Mode>(i))) == 0) g_options.mode = static_cast<Mode>(i);
+    } else if (reshade::get_config_value(nullptr, kSection, "FrameGenerationOn", on)) {
+        // 1.0.0-fg.1/2 saved an on/off flag and a generated frame count
+        reshade::get_config_value(nullptr, kSection, "FrameGenerationFrames", frames);
+        g_options.mode = !on ? Mode::off : frames >= 3 ? Mode::x4 : frames == 2 ? Mode::x3 : Mode::x2;
+    }
     reshade::get_config_value(nullptr, kSection, "FrameGenerationCopyTags", g_options.copyTags);
     static const char* names[] = {"off", "factory hook", "swap chain upgrade"};
-    LOG("fg: settings: %s, generate %d, %u frames, copy tags %d", names[static_cast<int>(g_options.hook)],
-        g_options.generate, g_options.framesToGenerate, g_options.copyTags);
+    LOG("fg: settings: %s, mode %s, copy tags %d", names[static_cast<int>(g_options.hook)], ModeName(g_options.mode),
+        g_options.copyTags);
     if (g_options.hook != Hook::off) SetStatus("waiting for the D3D12 device");
 }
 
 void SaveSettings() {
     reshade::set_config_value(nullptr, kSection, "FrameGeneration", static_cast<int>(g_options.hook));
-    reshade::set_config_value(nullptr, kSection, "FrameGenerationOn", g_options.generate);
-    reshade::set_config_value(nullptr, kSection, "FrameGenerationFrames", g_options.framesToGenerate);
+    reshade::set_config_value(nullptr, kSection, "FrameGenerationMode", ModeName(g_options.mode));
     reshade::set_config_value(nullptr, kSection, "FrameGenerationCopyTags", g_options.copyTags);
     std::lock_guard lock(g_mutex);
     g_optionsDirty = true;

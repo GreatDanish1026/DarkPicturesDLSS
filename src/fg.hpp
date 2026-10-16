@@ -16,15 +16,28 @@ namespace fg {
 // ReShade.ini at load: a change needs a game restart.
 enum class Hook : int {
     off = 0,
-    factory = 1,  // the game's CreateSwapChain* goes through an SL factory proxy (game -> SL -> ReShade -> DXGI)
+    factory = 1,  // swap chain creation goes through an SL factory proxy; ReShade makes that call,
+                  // so game -> ReShade -> SL -> DXGI (works, FINDINGS.md run 2)
     upgrade = 2,  // slUpgradeInterface on the finished swap chain, ReShade's calls redirected to it
                   // (game -> ReShade -> SL -> DXGI); needs a swap chain resize to take the buffers over
 };
 
+// What DLSS-G presents per rendered frame. DLSS-G has no model presets to choose
+// (Streamline only has them for Super Resolution and Ray Reconstruction); its model
+// comes from the driver or the NVIDIA App override.
+enum class Mode : int {
+    off = 0,   // DLSSGMode::eOff (Streamline stays loaded)
+    x2,        // eOn, 1 generated frame
+    x3,        // eOn, 2
+    x4,        // eOn, 3 (capped by numFramesToGenerateMax)
+    dynamic,   // eDynamic: Streamline picks the multiplier to reach the refresh rate
+    count
+};
+const char* ModeName(Mode m);  // "Off", "2x", ... (also the ReShade.ini value)
+
 struct Options {
     Hook hook = Hook::off;
-    bool generate = true;            // DLSSGMode::eOn, else eOff (Streamline stays loaded)
-    uint32_t framesToGenerate = 1;   // 1 = 2x, 2 = 3x, 3 = 4x (capped by numFramesToGenerateMax)
+    Mode mode = Mode::x2;
     bool reflex = true;              // Reflex low latency (DLSS-G refuses to run without it)
     bool copyTags = true;            // eOnlyValidNow (SL copies motion/depth when tagged), else eValidUntilPresent
 };
