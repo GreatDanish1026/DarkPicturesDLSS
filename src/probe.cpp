@@ -1235,10 +1235,18 @@ bool OnDispatch(command_list* cmd, uint32_t x, uint32_t y, uint32_t z) {
     OnPass(cmd, true, what);
 
     auto& st = g_contexts[cmd];
-    if (g_api != device_api::d3d12 || !IsTaau(st.cs) || !dlss::g_options.enabled) return false;
+    if (g_api != device_api::d3d12 || !IsTaau(st.cs)) return false;
     dlss::Frame f;
     std::string why;
     const bool built = BuildDlssFrame(cmd, st, f, why);
+    // The game's pre-exposure, with DLSS on or off: is a jump at a cut the game's own?
+    static float loggedPre = 0.0f;
+    if (built && (f.preExposure > loggedPre * 1.25f || f.preExposure < loggedPre * 0.8f)) {
+        Log("pre-exposure %.4g at frame %llu (DLSS %s)%s", f.preExposure, static_cast<unsigned long long>(g_frame),
+            dlss::g_options.enabled ? "on" : "off", f.reset ? ", camera cut" : "");
+        loggedPre = f.preExposure;
+    }
+    if (!dlss::g_options.enabled) return false;
     g_pendingCut = g_pendingCut || f.reset;
     if (!built) {
         LogSkip(why);

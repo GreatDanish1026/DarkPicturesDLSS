@@ -364,6 +364,22 @@ Frame dump 1705 (0.5.10, kick close-up, 85 frames after a reset that reached DLS
   threshold). Suspect a region whose motion we get wrong: for example, scenery that
   moves with the camera and gets camera motion, or vice versa. Next test: the same shot
   with "Ignore game velocity" and with "Invert motion vectors".
+- **0.5.14 A/B run (10:11-10:12):**
+  - **"Yah!" shot:** both "Ignore game velocity" (frames 6047-6138) and "Invert motion
+    vectors" (frames 11820-11912) kept the clamp cut at **0.0%** for the whole shot. DLSS
+    tracked the input (0.06 -> 0.16 -> 0.07), where the default run reached 30% with a
+    flat DLSS mean. So the smear comes from the game's velocity on part of that shot.
+    Camera-only motion fixes it. Inverting probably works only because DLSS then rejects
+    that history, so it's not a fix.
+  - **Kick shot:** the 10:12:38 screenshot is fully white. It was taken at age ~3 of the
+    frame 11913 cut, exactly when `pre` jumps 0.428 -> 2458 and the input mean
+    0.017 -> 31. DLSS matches the input, so this white flash is in the game's colour,
+    not added by DLSS. The 10:11:55 screenshot (ignore velocity, same shot ~0.4 s later)
+    is clean and normally exposed. Still open: does the game flash like this with DLSS
+    off?
+- **0.5.15:** logs `pre-exposure <value> at frame N (DLSS on|off)` whenever the game's
+  PreExposure changes by more than 25%, with DLSS on or off. A DLSS-off run of the kick
+  shot answers whether the jump to ~2458 is the game's own.
 
 ### Crash report from a probe 0.3.1 session
 
