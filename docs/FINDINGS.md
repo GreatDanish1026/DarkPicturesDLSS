@@ -421,6 +421,19 @@ Frame dump 1705 (0.5.10, kick close-up, 85 frames after a reset that reached DLS
   right for the moving characters there, and the test separates right from wrong
   motion. The armed capture missed "Yah!" again, because it was pressed just after that
   cut. 0.5.19 arms for frame 45 of the current shot if it's younger than that.
+- **"Yah!" pair (frames 1613-1614, age 45-46): the game's velocity is right here too.**
+  On the 21.8% of pixels where it disagrees with camera motion (the arm and shoulder,
+  up to 8.8 px/frame), the reprojection error is 0.144 for game velocity, 0.301 for
+  camera-only, 0.327 for zero and 0.367 inverted. The wall matches the camera. So the
+  motion vectors DLSS gets are correct. "Ignore game velocity" and "Invert" only looked
+  clean because wrong motion makes DLSS throw its history away. They aren't fixes.
+- The error maps for every candidate are bright on the face and shoulder. The lighting
+  itself changes frame to frame: the shadow sweeps across the face, and the shot's
+  input mean swings 0.06 -> 0.18. Where the luma log shows DLSS's mean staying flat
+  (~0.09) through those swings, DLSS is keeping history through a lighting change.
+- **0.5.20** also captures the DLSS output (`output0/1`). The analyser downsamples it and
+  compares it with the input per region (`_outdiff.png`), to show where and how the
+  output departs from the frame it was made from.
 
 ### Crash report from a probe 0.3.1 session
 

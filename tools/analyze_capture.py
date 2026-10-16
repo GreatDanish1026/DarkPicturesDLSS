@@ -37,6 +37,7 @@ def read_header(path):
             h["frame" + sfx], h["age" + sfx] = int(parts[1]), int(parts[3])
         elif base == "render":
             h["render"] = tuple(int(v) for v in parts[1].split("x"))
+            h["output"] = tuple(int(v) for v in parts[4].split("x"))
         elif base == "preexposure":
             h["pre" + sfx] = float(parts[1])
         elif base == "clip_to_prev_clip":
@@ -47,10 +48,10 @@ def read_header(path):
     return h
 
 
-def load(h, name, dtype, channels):
+def load(h, name, dtype, channels, size=None):
     w, hh, fmt, path = h["textures"][name]
     a = np.fromfile(path, dtype=dtype)
-    rw, rh = h["render"]
+    rw, rh = size or h["render"]
     a = a.reshape(hh, w, channels) if channels > 1 else a.reshape(hh, w)
     return a[:rh, :rw]
 
@@ -160,6 +161,25 @@ def main():
                     line += f" {err[sl].mean():.3f}"
             print(line)
             save_gray(f"{tag}_err_{name}.png", err / 0.5)
+    if "output" + s in h["textures"]:
+        # DLSS output vs its input: downsample the output to render size and compare luma.
+        ow, oh = h["output"]
+        out = load(h, "output" + s, np.float16, 4, (ow, oh))[..., :3].astype(np.float32)
+        Image.fromarray((tone(out) * 255).astype(np.uint8)).save(tag + "_output.png")
+        small = np.stack([np.asarray(Image.fromarray(out[..., c]).resize((rw, rh), Image.BILINEAR)) for c in range(3)],
+                         axis=-1).astype(np.float64)
+        lum = lambda c: c @ np.array([0.2126, 0.7152, 0.0722])
+        li, lo = lum(color), lum(small)
+        rel = np.abs(lo - li) / max(li.mean(), 1e-6)
+        print(f"DLSS output vs input (luma, output downsampled): input mean {li.mean():.4f}, output mean {lo.mean():.4f}, "
+              f"mean |diff| / mean input {rel.mean():.3f}")
+        for j in range(gy):
+            line = "  "
+            for i in range(gx):
+                sl = (slice(j * rh // gy, (j + 1) * rh // gy), slice(i * rw // gx, (i + 1) * rw // gx))
+                line += f" in {li[sl].mean():.3f} out {lo[sl].mean():.3f} |d| {rel[sl].mean():.3f} |"
+            print(line)
+        save_gray(tag + "_outdiff.png", rel / 0.5)
     print("wrote PNGs to " + tag + "_*.png")
 
 

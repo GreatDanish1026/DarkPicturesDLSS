@@ -724,7 +724,9 @@ Result Evaluate(const Frame& f) {
     }
     // Two consecutive frames: the second one's motion should map its colour onto the first's.
     const bool second = g_captureSecond;
+    const char* captureOutput = nullptr;  // set when this frame is captured: DLSS output too
     if ((g_captureWanted && g_capture.empty()) || second) {
+        captureOutput = second ? "output1" : "output0";
         g_captureWanted = false;
         g_captureSecond = !second;
         const char* sfx = second ? "1" : "0";
@@ -786,6 +788,10 @@ Result Evaluate(const Frame& f) {
     g_lastEvalFrame = f.frame;
     g_lastFeature = feature;
     SetStatus("running: %ux%u -> %ux%u", f.renderW, f.renderH, f.outW, f.outH);
+    if (captureOutput) {
+        cmd->barrier(f.output, resource_usage::unordered_access, resource_usage::unordered_access);  // DLSS done
+        CaptureTexture(cmd, f.output, resource_usage::unordered_access, captureOutput);
+    }
 
     // 3. Clamped copy of the DLSS output for next frame's SSGI/SSR (PatchLightingHistory),
     // and brightness counters. The pass runs for the counters even with the clamp off;
