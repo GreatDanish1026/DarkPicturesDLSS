@@ -53,3 +53,14 @@ https://github.com/NVIDIA/DLSS
 Copyright (c) NVIDIA Corporation. Used under the NVIDIA RTX SDKs license, see
 third_party/dlss/LICENSE.txt. The DLSS runtime (nvngx_dlss.dll) is not part of
 this repository; build.ps1 -Install copies it from an existing install.
+
+
+----------------------------------------------------------------------------
+NVIDIA Streamline SDK 2.14.1 headers (third_party/streamline/include)
+https://github.com/NVIDIA-RTX/Streamline
+----------------------------------------------------------------------------
+Copyright (c) 2022-2023 NVIDIA CORPORATION. MIT license, see
+third_party/streamline/LICENSE.txt. Only the frame generation experiment
+(fg.cpp, off by default) uses them. The Streamline runtime (sl.*.dll) and
+nvngx_dlssg.dll are not part of this repository; build.ps1 -InstallStreamline
+copies them from NVIDIA's SDK release.

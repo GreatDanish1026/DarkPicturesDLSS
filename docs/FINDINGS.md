@@ -531,6 +531,175 @@ UE toggles fullscreen on F11, so every Ctrl+F11 frame dump also switched the gam
 dumps coincide with swap chain resizes, some dumps are at 1280x720, and some contain two
 frames' worth of passes. Probe 0.3.1 dumps on **Ctrl+F9**.
 
+## Frame Generation spike (branch `fg-spike`, 1.0.0-fg.1)
+
+The question: can NVIDIA DLSS Frame Generation (DLSS-G, through the Streamline SDK) run
+in The Quarry from our ReShade add-on on D3D12? This build adds an opt-in, off-by-default
+experiment in `src/fg.cpp`. **Nothing has been run in game yet**, so the in-game answers
+below are still open. What's established so far comes from the Streamline 2.14.1 SDK
+(source, headers and docs, downloaded 2026-10-16 from NVIDIA-RTX/Streamline) and from the
+build.
+
+### Why it's hard: who owns the swap chain
+
+- The game already presents through ReShade's swap chain proxy (ReShade is `dxgi.dll` in
+  the game folder). DLSS-G needs **Streamline's** proxy swap chain in the present path. It
+  intercepts Present, presents the generated frames from its own queue and thread, and
+  makes the game render into off-screen buffers ("the host has no direct access to swap
+  chain buffers", DLSS-FG guide §18).
+- The add-on can't link `sl.interposer.lib`. It exports `CreateDXGIFactory*` /
+  `D3D12CreateDevice` and would clash with `dxgi.lib`, and the add-on must load without
+  Streamline. So Streamline runs in **manual hooking** mode: `sl.interposer.dll` is
+  loaded at run time with `LoadLibrary` (only after `verifyEmbeddedSignature` passes),
+  and every entry point comes from `GetProcAddress` / `slGetFeatureFunction`.
+  `dumpbin /dependents` confirms the add-on still imports only dxgi, advapi32, user32
+  and kernel32.
+- From the SL source (`sl.api/sl.cpp`): `slUpgradeInterface` accepts an `ID3D12Device`,
+  an `IDXGIFactory` and also an **already-created `IDXGISwapChain`** (it wraps it in a new
+  proxy). Calling it is the easy part. The hard part is getting the game's calls into the
+  proxy, because the game holds ReShade's proxy, which holds the native swap chain.
+- Streamline's plugins (`sl.common` hooks `slHookCreateSwapChain*`, and DLSS-G's binary
+  plugin) expect to see the swap chain **being created**. The DLSS-G plugin isn't open
+  source, so whether it can attach to a swap chain that already exists can't be read
+  from the code; the test answers it.
+
+### Two strategies, picked in ReShade.ini (`[QuarryDLSS] FrameGeneration=0/1/2`, restart)
+
+| | 1: factory hook | 2: swap chain upgrade |
+|---|---|---|
+| How | At `init_device` the add-on patches the shared `IDXGIFactory` vtable (system32 dxgi.dll) slots 10 `CreateSwapChain` and 15 `CreateSwapChainForHwnd`. When the **game exe** creates its swap chain, the call goes through an SL factory proxy (`slUpgradeInterface` on the factory). Streamline's call back down passes through (thread-local guard), so ReShade still wraps the native swap chain. | On the first ReShade present after `init_swapchain`: `slUpgradeInterface` on the native swap chain, then the native swap chain vtable is patched (Present, GetBuffer, SetFullscreenState, ResizeBuffers, Present1, GetCurrentBackBufferIndex, ResizeBuffers1). Calls coming **from ReShade's module** on that swap chain go to the SL proxy; Streamline's own calls go to DXGI. |
+| Order | game -> Streamline -> ReShade -> DXGI | game -> ReShade -> Streamline -> DXGI |
+| DLSS-G sees creation | yes | no |
+| Back buffers | Streamline's from the start | The game and ReShade already hold the real ones. Toggle F11 twice (a resize) so they fetch them again through Streamline |
+| ReShade sees | every presented frame, generated ones included. `fg::IsRealPresent` counts one probe frame per game Present, so the DLSS SR frame-gap reset logic still works | real frames only |
+| ReShade overlay | drawn on every presented frame, not interpolated | drawn before Streamline, so it gets interpolated |
+
+Both strategies restore every patched vtable entry when the add-on unloads. That matters
+because ReShade unloads and reloads the add-on for the throwaway devices at startup.
+Streamline is only initialised once a swap chain is being created (factory) or exists
+(upgrade), so the throwaway devices never load it.
+
+### What DLSS-G gets (TagFrame, called right after the DLSS SR evaluate)
+
+- **Tags** (`slSetTagForFrame`, frame-based tagging): our depth `g_depth` (R32F,
+  reversed-Z) and motion vectors `g_motion` (RG16F, render pixels, current -> previous,
+  camera motion everywhere), both with the render rect as extent and in UAV state. The
+  lifecycle is `eOnlyValidNow` by default: Streamline copies them on the game's command
+  list, because we overwrite both every frame. The overlay can switch to
+  `eValidUntilPresent`. The **back buffer subrect** is tagged with the view centred in
+  the back buffer (3840x1600 at y 280 in letterboxed shots). Streamline then copies the
+  bars outside it unchanged instead of interpolating them.
+- **Constants** (`slSetConstants`):
+  - `cameraViewToClip` = View rows 28-31 with row 30.xy (the TAA jitter) zeroed, and
+    `clipToCameraView` = its inverse;
+  - `clipToPrevClip` = View rows 122-125, and `prevClipToClip` = its inverse. UE builds
+    ClipToPrevClip from the NoAA projections, so it has no jitter;
+  - `jitterOffset` = the same pixels given to DLSS SR (TAAU cb0 row 28.xy);
+  - `mvecScale` = (1/renderW, 1/renderH), negated with "Invert motion vectors";
+  - `cameraPos` = row 67, `cameraFwd` = row 18, and right/up derived from it in UE's
+    Z-up frame (roll ignored);
+  - near = row 31.z (10 cm), far = 1e7 (infinite), FOV and aspect from rows 28/29;
+  - `depthInverted`, `cameraMotionIncluded`;
+  - `reset` from our cut detection (the same value DLSS SR gets).
+- **Reflex/PCL**: `slReflexSetOptions(eLowLatency)` and `slDLSSGSetOptions` are applied on
+  the present thread, as Streamline asks. Around the game's Present: `eRenderSubmitEnd`
+  and `ePresentStart`, the present, then `ePresentEnd`. Then a new frame token,
+  `slReflexSleep` and `eSimulationStart/End` + `eRenderSubmitStart` for the next frame.
+  There's no hook into UE's game thread, so the simulation markers are placeholders and
+  the sleep stalls the RHI thread, not the simulation.
+- HUD-less colour and UI alpha are **not** provided, so subtitles and QTE prompts get
+  interpolated with the scene.
+
+### Log lines to read after a test (all prefixed `fg:` or `sl`)
+
+- `fg: settings: ...`, then `patched IDXGIFactory2::CreateSwapChainForHwnd (was <module>+...)`
+  (factory) or `swap chain upgraded to an SL proxy` + the seven patches (upgrade).
+- `CreateSwapChainForHwnd from <module>`: it must say the exe for the factory hook to
+  engage. If it says `dxgi.dll`, ReShade is calling in above us.
+- `DLSS-G: loaded 1, supported: eOk, SL 2.14.1, NGX ...`, the requirements line (HW
+  scheduling, VSync, driver), and the `sl error/warn` lines from Streamline itself.
+- `DLSS-G status 0x0 ok`, or flags such as `reflex-not-detected` or `constants-invalid`.
+- Every ~2 s: `real frames <fps, mean, sd, p99, max, hitches> | below SL <same for every
+  frame Streamline presents> | SL presented N (x per real frame)`. With 2x working,
+  "below SL" should be about twice "real", with a similar spread. These are CPU timestamps
+  of the submits; FrameView's `MsBetweenDisplayChange` is the reference for display
+  pacing.
+
+### Setup for a test run
+
+1. Hardware-accelerated GPU scheduling on (Windows Settings > Display > Graphics). DLSS-G
+   requires it.
+2. `.\build.ps1 -Install -InstallStreamline`. This copies sl.interposer, sl.common,
+   sl.dlss_g, sl.reflex, sl.pcl and nvngx_dlssg from `third_party\streamline\bin\x64`
+   (production, signed DLLs from the SDK's `bin\x64`, gitignored like nvngx_dlss.dll).
+3. ReShade overlay > QuarryDLSS > "Frame generation (experiment)": choose the factory hook,
+   then restart the game. DLSS SR must be on, since the tags are taken at the DLSS SR
+   dispatch.
+4. Load into gameplay and a cutscene. Note whether generated frames appear (NVIDIA overlay
+   or FrameView FPS roughly doubling), any pink tint (DLSS-G's invalid-state overlay),
+   subtitle and QTE prompt artifacts, and crashes. Then try 3 and 4 generated frames on the
+   RTX 5080.
+5. If the factory hook doesn't engage or crashes: switch to "Swap chain upgrade", restart,
+   load in, press F11 twice and check the same things.
+
+### Results (to fill in from the first run)
+
+| Question | Factory hook | Swap chain upgrade |
+|---|---|---|
+| Streamline loads (`slInit`, DLSS-G supported) | ? | ? |
+| Hook engages (game's swap chain through SL) | ? | ? |
+| DLSS-G status ok | ? | ? |
+| Generated frames visible, 2x | ? | ? |
+| Multi-frame 3x / 4x | ? | ? |
+| Pacing (below-SL sd / hitches) | ? | ? |
+| Subtitles / QTE prompts | ? | ? |
+| Crashes, device removed | ? | ? |
+
+### Blockers known before any run
+
+- **Swap chain ownership:** covered above. The factory hook is the only way DLSS-G sees
+  the creation it expects, and it puts ReShade under Streamline. The upgrade hook keeps
+  ReShade on top but probably can't take over the buffers, if DLSS-G works on an upgraded
+  swap chain at all.
+- **UI:** no HUD-less or UI alpha, so subtitles and QTE prompts are interpolated, and in
+  full-frame shots they'll smear or ghost when the scene moves under them. Letterbox-bar
+  subtitles, if the game draws them in the bars, sit outside the tagged subrect and are
+  copied unchanged. Producing HUD-less colour means finding the UMG/Slate pass and copying
+  the scene before it: possible with the probe's pass tracking, but its own project.
+- **Reflex placement:** the markers sit on the RHI thread around Present, not on the game
+  thread. DLSS-G checks that Reflex is present (`eFailReflexNotDetectedAtRuntime`), but
+  latency and pacing won't be as good as a native integration. The game thread runs one
+  or two frames ahead of the RHI thread, and Reflex sleep can't hold it back from here.
+- **Two NGX instances:** DLSS SR initialises NGX itself (dlss.cpp), and Streamline
+  initialises it again for DLSS-G on the same device. Untested; watch the log for NGX
+  errors.
+- **Licensing and signing:**
+  - The Streamline SDK and headers are MIT.
+  - `nvngx_dlssg.dll` and the DLSS runtime are under the NVIDIA RTX SDKs license.
+    Distribution is only allowed "incorporated in object code format into a software
+    application", with "material additional functionality", and never "as a stand-alone
+    product". A mod shouldn't ship them; users copy them from the SDK, as with
+    nvngx_dlss.dll.
+  - The guide says `Preferences::applicationId` is "provided by NVIDIA, required if using
+    NGX components"; we pass only the project id and engine type, as DLSS SR does. Whether
+    production `sl.dlss_g` accepts that is one of the things the first run shows.
+  - Production builds verify signatures: we check `sl.interposer.dll`'s NVIDIA signature
+    before loading it, and Streamline checks its plugins.
+  - The development DLLs (on-screen DLSS-G debug text and hotkeys) are in the SDK's
+    `bin\x64\development` if the production ones fail without saying why.
+
+### Recommendation (preliminary, until the results table is filled in)
+
+- **Run the factory hook once.** It's the only configuration that matches what DLSS-G
+  expects (creation seen, Streamline's buffers from the start). If it reaches "status ok"
+  with generated frames, continue with Streamline: the next steps are better Reflex
+  placement and a HUD-less copy.
+- If neither hook gets DLSS-G running, **stop** rather than switching to FSR 3 frame
+  generation. FSR 3 also has to own the swap chain (its replacement swap chain is created
+  in place of the game's), so it hits the same ReShade ownership problem. It only gains
+  vendor independence and source access, which would help diagnose the problem but not
+  solve it.
+
 ## Main TAA pass (Direct3D 11)
 
 UE 4.26's standard compute TAA (`TemporalAA.usf`, `FTemporalAACS`), dispatched as

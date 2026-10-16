@@ -21,6 +21,11 @@ struct Frame {
     float jitterX = 0, jitterY = 0;            // render pixels, from the TAA constants
     float clipToPrevClip[16] = {};             // View.ClipToPrevClip, row-major
     float preExposure = 1.0f;                  // View.PreExposure: the colour input is scaled by it
+    // For frame generation (fg.cpp) only:
+    float viewToClip[16] = {};                 // View.ViewToClip (rows 28-31), row-major, jittered
+    float cameraPos[3] = {};                   // View.WorldCameraOrigin (row 67)
+    float cameraFwd[3] = {};                   // view forward (row 18)
+    uint32_t backBufferW = 0, backBufferH = 0;
     bool reset = false;                        // camera cut (sticky across fallback frames)
     uint64_t frame = 0;                        // probe frame number, to spot frames DLSS missed
 };

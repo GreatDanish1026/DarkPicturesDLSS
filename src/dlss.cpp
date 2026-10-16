@@ -14,6 +14,7 @@
 #include <d3d12.h>
 
 #include "dlss.hpp"
+#include "fg.hpp"
 
 #include <nvsdk_ngx_helpers_d3d.h>
 
@@ -810,6 +811,32 @@ Result Evaluate(const Frame& f) {
     g_lastEvalFrame = f.frame;
     g_lastFeature = feature;
     SetStatus("running: %ux%u -> %ux%u", f.renderW, f.renderH, f.outW, f.outH);
+
+    // Frame generation experiment: the same motion and depth, tagged for DLSS-G (does
+    // nothing unless Streamline is loaded). Like NGX it records natively; the caller
+    // restores the game's state.
+    if (fg::Loaded()) {
+        fg::FrameInputs in;
+        in.cmd = list;
+        in.motion = reinterpret_cast<ID3D12Resource*>(g_motion.handle);
+        in.depth = reinterpret_cast<ID3D12Resource*>(g_depth.handle);
+        in.renderW = f.renderW;
+        in.renderH = f.renderH;
+        in.outW = f.outW;
+        in.outH = f.outH;
+        in.backBufferW = f.backBufferW;
+        in.backBufferH = f.backBufferH;
+        in.jitterX = e.InJitterOffsetX;
+        in.jitterY = e.InJitterOffsetY;
+        memcpy(in.viewToClip, f.viewToClip, sizeof(in.viewToClip));
+        memcpy(in.clipToPrevClip, f.clipToPrevClip, sizeof(in.clipToPrevClip));
+        memcpy(in.cameraPos, f.cameraPos, sizeof(in.cameraPos));
+        memcpy(in.cameraFwd, f.cameraFwd, sizeof(in.cameraFwd));
+        in.reset = reset;
+        in.mvJittered = key.jittered;
+        in.invertMotion = g_options.invertMotion;
+        fg::TagFrame(in);
+    }
     if (captureOutput) {
         cmd->barrier(f.output, resource_usage::unordered_access, resource_usage::unordered_access);  // DLSS done
         CaptureTexture(cmd, f.output, resource_usage::unordered_access, captureOutput);

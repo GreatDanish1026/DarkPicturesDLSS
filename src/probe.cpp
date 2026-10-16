@@ -47,6 +47,7 @@
 #include "cvars.hpp"
 #include "dlss.hpp"
 #include "dxbc.hpp"
+#include "fg.hpp"
 #include "version.h"
 
 #pragma comment(lib, "dxgi.lib")
@@ -700,6 +701,7 @@ void OnInitDevice(device* dev) {
     g_api = dev->get_api();
     g_haveDevice = true;
     Log("device created: %s", ApiName(g_api));
+    fg::OnInitDevice(dev);
     if (g_api == device_api::d3d11) {
         auto d3d = reinterpret_cast<ID3D11Device*>(dev->get_native());
         D3D_FEATURE_LEVEL fl = d3d->GetFeatureLevel();
@@ -743,6 +745,7 @@ void OnInitDevice(device* dev) {
 void OnInitSwapchain(swapchain* sc, bool resize) {
     std::lock_guard lock(g_mutex);
     Log("swap chain %s (%s)", resize ? "resized" : "created", ApiName(sc->get_device()->get_api()));
+    fg::OnInitSwapchain(sc, resize);
 }
 
 void UpdateSwapchainInfo(effect_runtime* rt) {
@@ -1166,6 +1169,11 @@ bool BuildDlssFrame(command_list* cmd, const ContextState& st, dlss::Frame& f, s
     memcpy(f.clipToPrevClip, row(cb1, 122), sizeof(f.clipToPrevClip));
     f.preExposure = row(cb1, 135)[1];
     if (!(f.preExposure > 0.0f) || f.preExposure > 1e30f) f.preExposure = 1.0f;
+    memcpy(f.viewToClip, row(cb1, 28), sizeof(f.viewToClip));
+    memcpy(f.cameraPos, row(cb1, 67), sizeof(f.cameraPos));
+    memcpy(f.cameraFwd, row(cb1, 18), sizeof(f.cameraFwd));
+    f.backBufferW = g_bbW;
+    f.backBufferH = g_bbH;
 
     // During loading the game binds 1x1 placeholders (e.g. for velocity): every input
     // must cover the render rect.
@@ -1325,6 +1333,8 @@ void WriteCbDump() {
 
 void OnPresent(command_queue*, swapchain*, const rect*, const rect*, uint32_t, const rect*) {
     std::lock_guard lock(g_mutex);
+    // With DLSS-G below ReShade's caller (factory hook), generated frames reach this too.
+    if (!fg::IsRealPresent()) return;
     if (g_dumpFrame && g_frame == g_dumpFrame) WriteDump();
     if (g_cbDumpFirst && g_frame == g_cbDumpLast) WriteCbDump();
     UpdateMainGuess();
@@ -1502,6 +1512,7 @@ void OnReshadePresent(effect_runtime* rt) {
     UpdateSwapchainInfo(rt);
     ApplyRenderScale();
     ApplyOverrides();
+    fg::Tick();
     dlss::Tick(rt);
     if (g_debugHotkeys && rt->is_key_down(VK_CONTROL)) {
         if (rt->is_key_pressed(VK_F9)) RequestDump();  // not F11: UE toggles fullscreen on it
@@ -1629,6 +1640,37 @@ void DrawDiagnostics() {
     ImGui::TextUnformatted("Log: QuarryDLSS.log next to the game executable.");
 }
 
+// DLSS-G through Streamline (fg.cpp): off unless a hook is chosen; the hook needs a restart.
+void DrawFrameGeneration() {
+    auto& o = fg::g_options;
+    static const char* hooks[] = {"Off", "Factory hook (game -> Streamline -> ReShade)",
+                                  "Swap chain upgrade (game -> ReShade -> Streamline)"};
+    int hook = static_cast<int>(o.hook);
+    bool changed = false;
+    if (ImGui::Combo("Streamline hook (restart the game)", &hook, hooks, 3)) {
+        o.hook = static_cast<fg::Hook>(hook);
+        changed = true;
+    }
+    ImGui::TextWrapped("Needs sl.interposer.dll, sl.common.dll, sl.dlss_g.dll, sl.reflex.dll, sl.pcl.dll and "
+                       "nvngx_dlssg.dll next to the game exe, and hardware-accelerated GPU scheduling.");
+    changed |= ImGui::Checkbox("Generate frames", &o.generate);
+    int frames = static_cast<int>(o.framesToGenerate);
+    if (ImGui::SliderInt("Generated frames per rendered frame", &frames, 1, 3)) {
+        o.framesToGenerate = static_cast<uint32_t>(frames);
+        changed = true;
+    }
+    changed |= ImGui::Checkbox("Reflex low latency", &o.reflex);
+    changed |= ImGui::Checkbox("Streamline copies motion/depth when tagged", &o.copyTags);
+    ImGui::TextWrapped("Status: %s", fg::Status().c_str());
+    ImGui::TextWrapped("Pacing: %s", fg::Pacing().c_str());
+    if (changed) {
+        Log("frame generation options at frame %llu: hook %d, generate %d, %u frames, reflex %d, copy tags %d",
+            static_cast<unsigned long long>(g_frame), static_cast<int>(o.hook), o.generate, o.framesToGenerate, o.reflex,
+            o.copyTags);
+        fg::SaveSettings();
+    }
+}
+
 void DrawOverlay(effect_runtime*) {
     std::lock_guard lock(g_mutex);
     auto& o = dlss::g_options;
@@ -1653,6 +1695,7 @@ void DrawOverlay(effect_runtime*) {
             g_quality = kCustomQuality;
         ImGui::Checkbox("Stabilise screen-space lighting (SSGI/SSR mods)", &o.clampLightingHistory);
     }
+    if (ImGui::CollapsingHeader("Frame generation (experiment)")) DrawFrameGeneration();
     if (ImGui::CollapsingHeader("Diagnostics")) DrawDiagnostics();
 
     // Save settings, and record option changes so a test run can be read back from the log.
@@ -1681,6 +1724,7 @@ void Install() {
     OpenLog();
     LogGameInfo();
     dlss::g_log = &Log;
+    fg::g_log = &Log;
     reshade::register_event<reshade::addon_event::init_device>(&OnInitDevice);
     reshade::register_event<reshade::addon_event::init_swapchain>(&OnInitSwapchain);
     reshade::register_event<reshade::addon_event::init_pipeline>(&OnInitPipeline);
@@ -1709,11 +1753,13 @@ void Install() {
     reshade::register_event<reshade::addon_event::present>(&OnPresent);
     reshade::register_event<reshade::addon_event::reshade_present>(&OnReshadePresent);
     LoadSettings();
+    fg::LoadSettings();
     reshade::register_overlay("QuarryDLSS", &DrawOverlay);
 }
 
 void Uninstall() {
     reshade::unregister_overlay("QuarryDLSS", &DrawOverlay);
+    fg::Shutdown();
     if (g_log) {
         Log("unloading");
         fclose(g_log);

@@ -5,9 +5,14 @@
 #   -Test     also builds and runs tests\dxbc_tests.cpp
 #   -Install  copies the add-on next to TheQuarry-Win64-Shipping.exe, plus nvngx_dlss.dll
 #             from -DlssDll if the game folder doesn't have that version yet
+#   -InstallStreamline  frame generation experiment: copies the Streamline runtime DLLs
+#             (sl.interposer, sl.common, sl.dlss_g, sl.reflex, sl.pcl, nvngx_dlssg) from
+#             -StreamlineBin (bin\x64 of NVIDIA's SDK release; not redistributed in this repo)
 param(
     [switch]$Install,
     [switch]$Test,
+    [switch]$InstallStreamline,
+    [string]$StreamlineBin = "$PSScriptRoot\third_party\streamline\bin\x64",
     [string]$GameBin = "E:\SteamLibrary\steamapps\common\The Quarry\SMG026\Binaries\Win64",
     # DLSS runtime matching the SDK in third_party\dlss (310.9.1). It isn't redistributed in this repo.
     [string]$DlssDll = "E:\Non-Steam Games\The Witcher 3 Wild Hunt\bin\x64_dx12\nvngx_dlss.dll"
@@ -38,8 +43,8 @@ $cmd = @(
     "rc /nologo /i `"$root\src`" /fo `"$obj\version.res`" `"$root\src\version.rc`"",
     ("cl /nologo /std:c++17 /O2 /EHsc /MT /W3 /D_CRT_SECURE_NO_WARNINGS /DNOMINMAX " +
      "/I `"$root\third_party\imgui`" /I `"$root\third_party\reshade\include`" " +
-     "/I `"$root\third_party\dlss\include`" /I `"$obj`" " +
-     "/Fo`"$obj\\`" `"$root\src\probe.cpp`" `"$root\src\dlss.cpp`" `"$obj\version.res`" " +
+     "/I `"$root\third_party\dlss\include`" /I `"$root\third_party\streamline\include`" /I `"$obj`" " +
+     "/Fo`"$obj\\`" `"$root\src\probe.cpp`" `"$root\src\dlss.cpp`" `"$root\src\fg.cpp`" `"$obj\version.res`" " +
      "/link /DLL /OUT:`"$root\bin\QuarryDLSS.addon64`" /PDB:`"$obj\QuarryDLSS.pdb`" /DEBUG " +
      "/LIBPATH:`"$root\third_party\dlss\lib`"")
 ) -join " && "
@@ -69,4 +74,14 @@ if ($Install) {
         Write-Host "Copied nvngx_dlss.dll $((Get-Item $DlssDll).VersionInfo.FileVersion) from $DlssDll"
     }
     Write-Host "Installed to $GameBin"
+}
+
+if ($InstallStreamline) {
+    if (-not (Test-Path "$GameBin\TheQuarry-Win64-Shipping.exe")) { throw "Game not found in $GameBin" }
+    if (Get-Process TheQuarry-Win64-Shipping -ErrorAction SilentlyContinue) { throw "Close the game first." }
+    foreach ($dll in "sl.interposer.dll", "sl.common.dll", "sl.dlss_g.dll", "sl.reflex.dll", "sl.pcl.dll", "nvngx_dlssg.dll") {
+        if (-not (Test-Path "$StreamlineBin\$dll")) { throw "$dll not found in $StreamlineBin (pass -StreamlineBin)" }
+        Copy-Item "$StreamlineBin\$dll" $GameBin -Force
+    }
+    Write-Host "Copied the Streamline runtime from $StreamlineBin to $GameBin"
 }
