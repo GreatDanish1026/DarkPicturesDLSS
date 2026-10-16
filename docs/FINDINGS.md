@@ -512,8 +512,9 @@ DLSS behaves as in 0.5.23. User-facing changes:
 - The "game changed a forced value" check now compares against the value last
   written, so changing the quality mode isn't reported as the game's doing.
 - **0.6.1:** adds **Ultra Quality (77%)**, created as NGX `UltraQuality` (render/output
-  fraction above 0.72). It never actually ran DLSS: 77% uses another TAA permutation,
-  fixed in 1.0.0-fg.4 (see "Frame Generation spike", run 3). The quality mode is now saved by name (`Quality=UltraQuality`,
+  fraction above 0.72). It never actually ran DLSS: 77% uses another TAA permutation
+  (fixed in 1.0.0-fg.4), and NGX rejects the `UltraQuality` mode at creation (fixed in
+  1.0.0-fg.5). See "Frame Generation spike", runs 3 and 4. The quality mode is now saved by name (`Quality=UltraQuality`,
   `Quality`, `Balanced`, ...). A 0.6.0 `QualityMode` index is migrated, since
   inserting a mode at the top shifted the indices.
 
@@ -738,6 +739,21 @@ Streamline is only initialised once a swap chain is being created (factory) or e
   `b569efd647217872`, which has the same shape and is the main guess at 100%, are never
   replaced.
 
+### Run 4 (1.0.0-fg.4, 2026-10-16 14:16): the second Ultra Quality bug
+
+- User report: still no frame generation at Ultra Quality.
+- fg.4 now treats `2f606fcaa114ea67` as the TAAU, but DLSS feature creation for
+  2960x1232 -> 3840x1600 failed with **`0xbad00010` (`NVSDK_NGX_Result_FAIL_UnsupportedParameter`)**.
+  A failed size isn't retried, so the game's TAAU ran from then on ("DLSS not ready for
+  this size", about 600 fallbacks per 4 s). The cause: `QualityFor` sent any fraction
+  above 0.72 to `NVSDK_NGX_PerfQuality_Value_UltraQuality`, and the NGX runtime (310.9.x,
+  through the NVIDIA App override) doesn't accept that mode. So 0.6.1's "created as NGX
+  `UltraQuality`" never worked either; it failed at creation.
+- **1.0.0-fg.5:** fractions above 0.62 (up to DLAA at 0.9) are created as `MaxQuality`
+  (Quality). DLSS takes any render size; the mode only selects its tuning. This also
+  covers custom render scales above 72%. Ultra Quality stays in the menu (the user asked
+  to keep it now that it can work). Not yet confirmed in game.
+
 ### Results
 
 | Question | Factory hook | Swap chain upgrade |

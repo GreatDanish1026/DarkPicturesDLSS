@@ -580,9 +580,11 @@ resource_view GameSrv(device* dev, resource res, format fmt) {
     return view;
 }
 
+// DLSS takes any render size; the mode only picks its tuning. NVSDK_NGX_PerfQuality_Value_UltraQuality
+// is not accepted (feature creation fails with 0xbad00010, FAIL_UnsupportedParameter), so the 77%
+// Ultra Quality mode is created as Quality.
 NVSDK_NGX_PerfQuality_Value QualityFor(float fraction) {
     if (fraction > 0.9f) return NVSDK_NGX_PerfQuality_Value_DLAA;
-    if (fraction > 0.72f) return NVSDK_NGX_PerfQuality_Value_UltraQuality;
     if (fraction > 0.62f) return NVSDK_NGX_PerfQuality_Value_MaxQuality;
     if (fraction > 0.55f) return NVSDK_NGX_PerfQuality_Value_Balanced;
     if (fraction > 0.4f) return NVSDK_NGX_PerfQuality_Value_MaxPerf;
