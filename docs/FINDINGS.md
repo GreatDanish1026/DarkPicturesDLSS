@@ -308,6 +308,16 @@ Frame dump 1705 (0.5.10, kick close-up, 85 frames after a reset that reached DLS
   velocity) and one-frame "not ready" on new sizes. Conclusion: the SSGI/SSR feedback
   loop was the remaining cause of the smearing, and the clamped history fixes it while
   keeping both effects on.
+- **0.5.12 second run (09:51-09:52): corruption came back** with SSGI/SSR on and the
+  clamp on. The first "And scene." of the session was blown out (09:51:57), including the
+  dark side walls, with horizontal staircases in the lower left. The clamp was copying
+  (first copy at frame 277), and motion was sane: the shot started at the frame 2247 cut,
+  with only 2-6% inflated velocity after it, not the stale-velocity pattern. So the
+  conclusion above was premature: 6 clean runs out of 7 isn't proof for an intermittent
+  bug. The clamp also can't bound a loop that runs through the input colour, since SSGI
+  adds last frame's light to the very input it clamps against. It only removes DLSS's
+  own accumulation from the loop. Open question: does the blow-up live in DLSS's
+  internal history or in the game's buffers (SSGI/SSR denoiser histories)?
 
 ### Crash report from a probe 0.3.1 session
 
