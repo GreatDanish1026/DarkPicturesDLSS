@@ -299,6 +299,15 @@ Frame dump 1705 (0.5.10, kick close-up, 85 frames after a reset that reached DLS
   from the mirrored bindings, normally #82), that copy is copied over the texture, with
   SRV -> copy_dest -> SRV barriers for the reader's stage. The displayed image stays
   unclamped. Overlay: "Clamp lighting history" (on by default) with a copy counter.
+- **0.5.12 run (2026-10-16, 08:00-08:02):** SSGI/SSR left on (no override or option
+  changes logged), clamp on. The user replayed the "And scene." kick shot 5 times and
+  the corruption did not appear. The 08:02:26 screenshot is clean with normal
+  brightness. The first clamped copy happened at frame 317, and the history texture
+  followed the 3840x1600 and 3840x2160 output sizes. There was no device removal, crash
+  or barrier error. The only fallbacks were the known loading and cut frames (1x1
+  velocity) and one-frame "not ready" on new sizes. Conclusion: the SSGI/SSR feedback
+  loop was the remaining cause of the smearing, and the clamped history fixes it while
+  keeping both effects on.
 
 ### Crash report from a probe 0.3.1 session
 
