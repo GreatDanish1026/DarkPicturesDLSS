@@ -749,17 +749,22 @@ Streamline is only initialised once a swap chain is being created (factory) or e
   - The development DLLs (on-screen DLSS-G debug text and hotkeys) are in the SDK's
     `bin\x64\development` if the production ones fail without saying why.
 
-### Recommendation (preliminary, until the results table is filled in)
+### Recommendation
 
-- **Run the factory hook once.** It's the only configuration that matches what DLSS-G
-  expects (creation seen, Streamline's buffers from the start). If it reaches "status ok"
-  with generated frames, continue with Streamline: the next steps are better Reflex
-  placement and a HUD-less copy.
-- If neither hook gets DLSS-G running, **stop** rather than switching to FSR 3 frame
-  generation. FSR 3 also has to own the swap chain (its replacement swap chain is created
-  in place of the game's), so it hits the same ReShade ownership problem. It only gains
-  vendor independence and source access, which would help diagnose the problem but not
-  solve it.
+- **Continue with Streamline, factory hook.** Streamline and ReShade coexist when
+  Streamline's factory proxy takes ReShade's call to the real CreateSwapChain (game ->
+  ReShade -> Streamline -> DXGI). DLSS-G then runs at 2x and 3x with status ok and even
+  real-frame pacing, and the user saw no artifacts. The upgrade hook is untested and no
+  longer needed.
+- Next, in order of value:
+  - switch DLSS-G off (or untag) while DLSS SR falls back, during loading and on cut
+    frames;
+  - try 4x and dynamic MFG on the RTX 5080;
+  - check subtitles and QTE prompts deliberately in full-frame shots;
+  - move the Reflex markers closer to the game thread;
+  - a HUD-less copy only if UI artifacts show up.
+- FSR 3 frame generation isn't needed for NVIDIA cards. It would only matter for
+  non-RTX 40/50 users, and it would face the same swap chain ownership problem.
 
 ## Main TAA pass (Direct3D 11)
 
