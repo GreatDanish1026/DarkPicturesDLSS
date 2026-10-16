@@ -1100,6 +1100,10 @@ the `HoA_NativeRTGI_Baseline_P.pak` mod.
 - `src/games.hpp` lists the shipping exes each product is made for (House of Ashes for now). The log
   says which game it recognised, or that it doesn't know the exe but will try anyway (pass detection
   is generic, plus the main-TAA-guess fallback for unknown TAAU permutations).
-- Still to test in House of Ashes: frame generation, F11 / fullscreen switches (its saved
-  `FullscreenMode=0` is exclusive fullscreen), Ultra Quality (`2f606fcaa114ea67`), and image quality
-  in RT-heavy scenes.
+- **0.1.0 test (2026-10-16 15:32-15:35): everything works (user report).** The log shows:
+  - the game recognised as House of Ashes;
+  - frame generation 2x, with the swap chain created through Streamline (from ReShade, as in The
+    Quarry) and DLSS-G status ok;
+  - Ultra Quality on `2f606fcaa114ea67`, with features 2960x1664 -> 3840x2160 and 2960x1260 -> 3840x1634;
+  - F11 and exclusive-fullscreen switches (15:33:45, 15:35:04-06), with DLSS-G off and its resources
+    freed each time and no device loss.
