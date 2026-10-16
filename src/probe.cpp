@@ -1083,14 +1083,30 @@ bool OnDrawIndexed(command_list* cmd, uint32_t indices, uint32_t instances, uint
 
 // ---------------------------------------------------------------- DLSS in place of TAAU
 
-// The game's TAAU compute shaders (TemporalAA.usf with upsampling), by shader key.
+// The game's TAAU compute shaders (TemporalAA.usf with upsampling), by shader key. UE 4.26
+// picks the permutation by screen percentage band, so each quality mode can use another.
 constexpr uint64_t kTaauShaders[] = {
-    0x6435b4eb8190e22bull,  // 3840x1600 output, 67% (2026-10-15)
+    0x6435b4eb8190e22bull,  // 50-71%: Quality, Balanced, Performance (2026-10-15)
+    0x2f606fcaa114ea67ull,  // 71-100%: Ultra Quality 77% (and the game's own 100% TAA)
 };
 
+// A known permutation, or else the pass the probe currently takes for the main TAA (a
+// permutation not seen yet, e.g. Ultra Performance). Either way BuildDlssFrame only accepts
+// it when it actually upscales, so a 100% TAA or a same-shaped denoiser is never replaced.
 bool IsTaau(uint64_t key) {
     for (uint64_t k : kTaauShaders)
         if (k == key) return true;
+    // The guess must itself upscale (by texture sizes): at 100% the guess can be the SSGI
+    // denoiser b569efd647217872, whose constants mean something else.
+    if (key && key == g_mainKey && g_mainOutW > g_mainInW) {
+        static uint64_t logged = 0;
+        if (logged != key) {
+            logged = key;
+            Log("dlss: main TAA %016llx is not a known TAAU permutation; trying it as one",
+                static_cast<unsigned long long>(key));
+        }
+        return true;
+    }
     return false;
 }
 
@@ -1187,6 +1203,8 @@ bool BuildDlssFrame(command_list* cmd, const ContextState& st, dlss::Frame& f, s
     char buf[200];
     if (f.renderW == 0 || f.renderH == 0 || f.outW == 0 || f.outH == 0) {
         snprintf(buf, sizeof(buf), "empty rect (render %ux%u, output %ux%u)", f.renderW, f.renderH, f.outW, f.outH);
+    } else if (f.renderW >= f.outW || f.renderH >= f.outH) {
+        snprintf(buf, sizeof(buf), "not upscaling (render %ux%u, output %ux%u)", f.renderW, f.renderH, f.outW, f.outH);
     } else if (f.renderW > minW || f.renderH > minH) {
         snprintf(buf, sizeof(buf), "an input is smaller than the %ux%u render rect (colour %ux%u, depth %ux%u, velocity %ux%u)",
                  f.renderW, f.renderH, colorDesc.texture.width, colorDesc.texture.height, depthDesc.texture.width,

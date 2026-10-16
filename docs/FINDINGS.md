@@ -512,7 +512,8 @@ DLSS behaves as in 0.5.23. User-facing changes:
 - The "game changed a forced value" check now compares against the value last
   written, so changing the quality mode isn't reported as the game's doing.
 - **0.6.1:** adds **Ultra Quality (77%)**, created as NGX `UltraQuality` (render/output
-  fraction above 0.72). The quality mode is now saved by name (`Quality=UltraQuality`,
+  fraction above 0.72). It never actually ran DLSS: 77% uses another TAA permutation,
+  fixed in 1.0.0-fg.4 (see "Frame Generation spike", run 3). The quality mode is now saved by name (`Quality=UltraQuality`,
   `Quality`, `Balanced`, ...). A 0.6.0 `QualityMode` index is migrated, since
   inserting a mode at the top shifted the indices.
 
@@ -710,6 +711,33 @@ Streamline is only initialised once a swap chain is being created (factory) or e
   fg.1/fg.2's `FrameGenerationOn` / `FrameGenerationFrames` are migrated. Off now sets
   `eRetainResourcesWhenOff`, so switching back on doesn't stutter.
 
+### Run 3 (1.0.0-fg.3, 2026-10-16 14:10): 4x and Dynamic work; Ultra Quality had no DLSS
+
+- **User report: 4x and Dynamic work well; subtitles and QTE prompts show no visual
+  issues.**
+- **4x:** 39 real fps -> 156 presented (4.00 per real frame, real frame sd 0.3 ms).
+  **Dynamic** settled on 2x here: 78 -> 156. Output is held at ~156 fps in every mode
+  (display refresh pacing), so above the needed multiplier a fixed 3x/4x only lowers the
+  real frame rate (52, then 39 fps), and with it responsiveness. Dynamic picks the
+  smallest multiplier that reaches the refresh rate, which makes it the sensible default.
+- **Bug: Ultra Quality turned frame generation off.** In fact it turned DLSS Super
+  Resolution off, and has done since Ultra Quality was added in 0.6.1. At 77% UE 4.26
+  uses another TemporalAA permutation (the screen percentage band 71-100%):
+  **`2f606fcaa114ea67`**, 2960x1664 inputs, 3840x1664 output texture, 3840x1600 view.
+  The add-on only knew `6435b4eb8190e22b` (the 50-71% band: Quality 67%, Balanced 58% and
+  Performance 50% all use it). So at Ultra Quality the game's own TAAU ran: no DLSS
+  frames, nothing tagged ("tagged 0"), and DLSS-G skipped every frame. The NGX line
+  "(UltraQuality) Using App hint Preset J" in earlier logs isn't evidence: NGX logs the
+  hint for every quality mode whenever a feature is created. Ultra Performance (33%)
+  has never been seen in a log and is probably a third permutation.
+- **1.0.0-fg.4:** `2f606fcaa114ea67` is a known TAAU permutation. Any other permutation is
+  tried when it's the probe's current main TAA guess and that guess upscales by texture
+  size. That covers Ultra Performance without knowing its key, and the log names the key
+  the first time. `BuildDlssFrame` now refuses any pass whose render rect isn't smaller
+  than its output ("not upscaling"). So the 100% TAA (`2f606` again) and the SSGI denoiser
+  `b569efd647217872`, which has the same shape and is the main guess at 100%, are never
+  replaced.
+
 ### Results
 
 | Question | Factory hook | Swap chain upgrade |
@@ -718,9 +746,9 @@ Streamline is only initialised once a swap chain is being created (factory) or e
 | Hook engages (game's swap chain through SL) | yes, via ReShade's call (fg.2; fg.1 missed it) | not tested |
 | DLSS-G status ok | yes | not tested |
 | Generated frames visible, 2x | yes: 78 -> 156 fps | not tested |
-| Multi-frame 3x / 4x | 3x yes: 52 -> 156 fps; 4x not tried (max 5 generated) | not tested |
+| Multi-frame 3x / 4x / Dynamic | 3x: 52 -> 156 fps; 4x: 39 -> 156 fps; Dynamic picks 2x (78 -> 156) | not tested |
 | Pacing (below-SL sd / hitches) | real frames sd ~0.2 ms; output capped near 156 fps; below-SL not measurable in this order | not tested |
-| Subtitles / QTE prompts | no visible artifacts reported | not tested |
+| Subtitles / QTE prompts | no visual issues (checked, run 3) | not tested |
 | Crashes, device removed | none | not tested |
 
 ### Blockers known before any run
