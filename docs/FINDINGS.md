@@ -1107,3 +1107,26 @@ the `HoA_NativeRTGI_Baseline_P.pak` mod.
   - Ultra Quality on `2f606fcaa114ea67`, with features 2960x1664 -> 3840x2160 and 2960x1260 -> 3840x1634;
   - F11 and exclusive-fullscreen switches (15:33:45, 15:35:04-06), with DLSS-G off and its resources
     freed each time and no device loss.
+
+## The Dark Pictures Anthology: The Devil in Me
+
+The Devil in Me (Steam, `SMG028\Binaries\Win64\TheDevilInMe-Win64-Shipping.exe`) is also **UE 4.26**,
+**Direct3D 12** with UE ray tracing (RT reflections and AO on in its settings), with no upscaler of its
+own (the only NVIDIA component is Aftermath). It uses the same SMG settings schema; exclusive fullscreen
+is saved (`FullscreenMode=0`). ReShade 6.8 was copied from House of Ashes for the probe run.
+
+### First run (DarkPicturesDLSS 0.1.0, 2026-10-16 15:39): device removed on the first DLSS frame
+
+- The game crashed right after launch: UE's "AllocateTexture ... DXGI_ERROR_DEVICE_REMOVED". ReShade
+  logged the removal reason as **DXGI_ERROR_INVALID_CALL**, at 15:39:56.46, right after the add-on's
+  first DLSS frame (frame 226, `running: 2564x1444 -> 3840x2160`).
+- The TAAU is again `6435b4eb8190e22b`, but the **scene colour (t1) is R11G11B10F**, not RGBA16F as
+  in The Quarry and House of Ashes. DLSS takes R11G11B10F, but the stabilised-lighting clamp pass made
+  an **RGBA16F SRV of that texture**: an invalid view, so D3D12 removed the device. Velocity, depth and
+  output are as before (RGBA16_UNORM, R32G8X24 depth, RGBA16F output).
+- **DarkPicturesDLSS 0.1.1 (shared code, so QuarryDLSS gets it too):**
+  - views of the game's textures use the texture's own format (`VelocityViewFormat`,
+    `DepthViewFormat`, `ColorViewFormat`); typeless formats map to the typed format the shader reads;
+  - a format a shader can't decode is refused with a status line instead of a bad view;
+  - the output UAV is only created once the output is known to be RGBA16F;
+  - the game's four input formats are logged once per change.
