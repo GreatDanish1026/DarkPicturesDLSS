@@ -478,6 +478,11 @@ Frame dump 1705 (0.5.10, kick close-up, 85 frames after a reset that reached DLS
   near-camera object moves fast against a dark background. **0.5.23 requests Preset J
   by default.** The overlay can still pick E, K, L or M. An NVIDIA App model override
   for the game replaces our hint, so it should be off.
+- **0.5.23 playtest (2026-10-16): working well.** The user reports DLSS looks good across
+  different scenes and cutscenes on Preset J, with the defaults: pre-exposure and game
+  exposure passed, the clamped lighting history on. Still open: whether the lighting
+  clamp is needed now that the real causes are fixed, and turning the probe into a
+  release build (diagnostics off by default, smaller log).
 
 ### Crash report from a probe 0.3.1 session
 
