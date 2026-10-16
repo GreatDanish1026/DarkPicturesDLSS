@@ -349,6 +349,21 @@ Frame dump 1705 (0.5.10, kick close-up, 85 frames after a reset that reached DLS
 - **0.5.14:** passes View.PreExposure (cb1 row 135.y) as `InPreExposure` every frame,
   with an overlay toggle "Pass the game's pre-exposure to DLSS" (on). The luma log lines
   now show `pre <value>`.
+- **0.5.14 run (10:08):** the log confirms the kick-shot jump is the game's pre-exposure.
+  `pre` went 0.428 -> 2458 at age 3 after the frame 1674 cut, the same frame the input
+  mean went 0.017 -> 31. It then decayed with the eye adaptation (1016 at age 15, 17 at
+  31, ~8 at 64). DLSS followed the input throughout (clamp cut 0.0%). There was no
+  screenshot of the kick shot this run.
+- **The "Yah!" smear is a separate bug (10:08:38 screenshot, same as 10:04:08):**
+  pre-exposure stayed constant at ~0.427 through the whole shot (frames 1584-1673), so
+  it isn't exposure. As in 0.5.13, the DLSS mean stays flat (~0.09) while the input moves
+  0.094 -> 0.059 -> 0.176 -> 0.068. The clamp cut climbs steadily from 0% at the reset to
+  ~30% by age 55, like a smear front advancing each frame. The streaks are on the left
+  near wall and the floor behind it, while the face is clean. Velocity stats look sane
+  (76% object-velocity pixels, decoded ~1.4x camera motion, nothing over the stale
+  threshold). Suspect a region whose motion we get wrong: for example, scenery that
+  moves with the camera and gets camera motion, or vice versa. Next test: the same shot
+  with "Ignore game velocity" and with "Invert motion vectors".
 
 ### Crash report from a probe 0.3.1 session
 
