@@ -663,18 +663,58 @@ Streamline is only initialised once a swap chain is being created (factory) or e
   the real DXGI function. Log callers now read "ReShade" or "the game exe", since both
   modules are named dxgi.dll.
 
-### Results (to fill in from the first run)
+### Run 2 (1.0.0-fg.2, factory hook, 2026-10-16 13:50-13:51): DLSS-G works
+
+- **User report: frame generation works, with no visible artifacts.**
+- The hook engaged as intended: `CreateSwapChain from ReShade`, then `CreateSwapChain
+  through Streamline: 0x00000000`, so the order is game -> ReShade -> Streamline -> DXGI.
+  Streamline coexists with ReShade this way.
+- `slInit`, then DLSS-G, Reflex and PCL all report loaded and supported (driver 617.42, HW
+  scheduling required and on). Status `0x0 ok` from the first present. Max generated frames
+  is **5** on the RTX 5080 (up to 6x).
+- **Generated frames and pacing** (the 2-second log lines in gameplay):
+
+  | Mode | Real frames | Presented by SL | Real frame time sd / max |
+  |---|---|---|---|
+  | 3x (2 generated) | 52.0 fps | 156 fps (3.00 per real frame) | 0.2-1.4 ms / 20-29 ms |
+  | 2x (1 generated, switched live) | 78.0 fps | 156 fps (2.00 per real frame) | 0.2-0.8 ms / 13-16 ms |
+
+  The output stays at ~156 fps in both modes, so it looks capped (probably Reflex/DLSS-G
+  pacing to the display refresh). Switching 3x -> 2x applied on the next present with no
+  hitch. "Below SL" pacing isn't measured in this order: ReShade sits above Streamline,
+  so nothing of ours sees the generated presents. FrameView or the NVIDIA overlay would
+  have to cover display pacing.
+- **Cut frames:** each camera cut logs `Failed to find global tag 'kBufferTypeDepth' /
+  'kBufferTypeMotionVectors'` (and once "Unable to find 'common' constants"). These are
+  the frames where DLSS SR falls back to the game's TAAU (1x1 velocity on cuts), so
+  nothing is tagged and DLSS-G skips generation for that frame. That's harmless and
+  arguably right at a cut. Loading screens log "missing common constants" every frame
+  for the same reason (280 lines in this run). It would be quieter to switch DLSS-G off
+  while DLSS SR isn't running.
+- **NVIDIA App overrides apply:** with the App's DLSS override (DRS `SL_DLSS_OVERRIDE`)
+  on, Streamline loaded its OTA plugins (sl.common/dlss_g/reflex/pcl **2.14.16** from
+  `C:\ProgramData\NVIDIA\NGX\models`) instead of our 2.14.1 copies, and NGX logged
+  "Feature dlssg override enabled". It used the App's frame generation snippet
+  (`dlssg\versions\20318480`), even though `eAllowOTA` isn't set.
+- **Frame generation presets:** there are none to expose. Streamline 2.14.1's
+  `DLSSGOptions` has mode, frame count, flags and dynamic-MFG fields but no preset or
+  model hint. The SDK's lettered presets (A-M) are only for DLSS Super Resolution
+  (`DLSSPreset`) and Ray Reconstruction (`DLSSDPreset`), and the NGX headers have no
+  frame generation preset parameter either. The frame generation model comes from the
+  driver, or from the NVIDIA App's override as above.
+
+### Results
 
 | Question | Factory hook | Swap chain upgrade |
 |---|---|---|
-| Streamline loads (`slInit`, DLSS-G supported) | ? | ? |
-| Hook engages (game's swap chain through SL) | ? | ? |
-| DLSS-G status ok | ? | ? |
-| Generated frames visible, 2x | ? | ? |
-| Multi-frame 3x / 4x | ? | ? |
-| Pacing (below-SL sd / hitches) | ? | ? |
-| Subtitles / QTE prompts | ? | ? |
-| Crashes, device removed | ? | ? |
+| Streamline loads (`slInit`, DLSS-G supported) | yes (fg.2) | not tested |
+| Hook engages (game's swap chain through SL) | yes, via ReShade's call (fg.2; fg.1 missed it) | not tested |
+| DLSS-G status ok | yes | not tested |
+| Generated frames visible, 2x | yes: 78 -> 156 fps | not tested |
+| Multi-frame 3x / 4x | 3x yes: 52 -> 156 fps; 4x not tried (max 5 generated) | not tested |
+| Pacing (below-SL sd / hitches) | real frames sd ~0.2 ms; output capped near 156 fps; below-SL not measurable in this order | not tested |
+| Subtitles / QTE prompts | no visible artifacts reported | not tested |
+| Crashes, device removed | none | not tested |
 
 ### Blockers known before any run
 
