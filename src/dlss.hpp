@@ -53,6 +53,9 @@ Result Evaluate(const Frame& f);
 // game's SSGI/SSR), copy the clamped version over it first. Once per frame.
 bool PatchLightingHistory(command_list* cmd, resource texture, bool compute, uint64_t frame);
 uint64_t LightingHistoryPatches();
+// Copies the next DLSS frame's colour, velocity, motion and depth to files next to the exe.
+void RequestCapture();
+std::string CaptureStatus();
 void OnDestroyResource(resource r);  // drops cached views of game textures
 void Shutdown(device* dev);
 

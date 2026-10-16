@@ -323,6 +323,109 @@ void CollectLuma(device* dev, uint32_t slot) {
         maxima[2], 100.0 * s[7] / s[0], 100.0 * s[10] / s[0], 100.0 * s[11] / s[0], s[9], s[8], lit);
 }
 
+// ---- texture capture (RequestCapture): one DLSS frame's inputs, raw, for offline analysis.
+// Copied to readback buffers in the game's command list, written to files a few presents
+// later (long done on the GPU): QuarryDLSS_capture_<frame>_<name>.bin plus a .txt header.
+
+struct CaptureItem {
+    std::string name;
+    ID3D12Resource* buffer = nullptr;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
+    UINT rows = 0;
+    UINT64 rowBytes = 0;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+};
+bool g_captureWanted = false;
+uint32_t g_captureWait = 0;  // presents until the copies are read back
+std::vector<CaptureItem> g_capture;
+std::string g_captureHeader;
+uint64_t g_captureFrame = 0;
+std::string g_captureStatus;
+
+std::string GameDir() {
+    char path[MAX_PATH] = {};
+    GetModuleFileNameA(nullptr, path, MAX_PATH);
+    std::string dir = path;
+    return dir.substr(0, dir.find_last_of("\\/") + 1);
+}
+
+// Records a copy of subresource 0 of <res> (currently in <state>) into a new readback buffer.
+void CaptureTexture(command_list* cmd, resource res, resource_usage state, const char* name) {
+    auto* tex = reinterpret_cast<ID3D12Resource*>(res.handle);
+    const D3D12_RESOURCE_DESC desc = tex->GetDesc();
+    CaptureItem item;
+    item.name = name;
+    item.format = desc.Format;
+    UINT64 total = 0;
+    g_d3d->GetCopyableFootprints(&desc, 0, 1, 0, &item.footprint, &item.rows, &item.rowBytes, &total);
+    D3D12_HEAP_PROPERTIES heap = {};
+    heap.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC buf = {};
+    buf.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buf.Width = total;
+    buf.Height = 1;
+    buf.DepthOrArraySize = 1;
+    buf.MipLevels = 1;
+    buf.SampleDesc.Count = 1;
+    buf.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (FAILED(g_d3d->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buf, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                              IID_PPV_ARGS(&item.buffer)))) {
+        LOG("capture: could not create a %llu-byte readback buffer for %s", static_cast<unsigned long long>(total), name);
+        return;
+    }
+    D3D12_TEXTURE_COPY_LOCATION dst = {};
+    dst.pResource = item.buffer;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint = item.footprint;
+    D3D12_TEXTURE_COPY_LOCATION src = {};
+    src.pResource = tex;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = 0;
+    cmd->barrier(res, state, resource_usage::copy_source);
+    reinterpret_cast<ID3D12GraphicsCommandList*>(cmd->get_native())->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    cmd->barrier(res, resource_usage::copy_source, state);
+    g_capture.push_back(item);
+}
+
+void ReleaseCapture() {
+    for (auto& item : g_capture)
+        if (item.buffer) item.buffer->Release();
+    g_capture.clear();
+}
+
+// At present: once the copies are surely done, writes them out.
+void FinishCapture() {
+    if (g_capture.empty() || --g_captureWait > 0) return;
+    const std::string base = GameDir() + "QuarryDLSS_capture_" + std::to_string(g_captureFrame);
+    std::string header = g_captureHeader;
+    for (auto& item : g_capture) {
+        void* p = nullptr;
+        const D3D12_RANGE range = {0, static_cast<SIZE_T>(item.footprint.Footprint.RowPitch) * item.rows};
+        if (FAILED(item.buffer->Map(0, &range, &p)) || !p) continue;
+        const std::string file = base + "_" + item.name + ".bin";
+        if (FILE* f = fopen(file.c_str(), "wb")) {
+            for (UINT y = 0; y < item.rows; ++y)
+                fwrite(static_cast<const uint8_t*>(p) + item.footprint.Offset + size_t(y) * item.footprint.Footprint.RowPitch,
+                       1, static_cast<size_t>(item.rowBytes), f);
+            fclose(f);
+        }
+        const D3D12_RANGE none = {0, 0};
+        item.buffer->Unmap(0, &none);
+        char line[200];
+        snprintf(line, sizeof(line), "texture %s %ux%u dxgi_format %d bytes_per_row %llu file %s\n", item.name.c_str(),
+                 item.footprint.Footprint.Width, item.rows, static_cast<int>(item.format),
+                 static_cast<unsigned long long>(item.rowBytes), (base + "_" + item.name + ".bin").c_str());
+        header += line;
+    }
+    if (FILE* f = fopen((base + ".txt").c_str(), "w")) {
+        fputs(header.c_str(), f);
+        fclose(f);
+    }
+    LOG("capture: wrote %s.txt and %zu textures", base.c_str(), g_capture.size());
+    g_captureStatus = "wrote " + base + ".txt";
+    ReleaseCapture();
+}
+
 bool CreatePipeline(device* dev) {
     pipeline_layout_param params[3];
     params[0] = pipeline_layout_param(constant_range{0, 0, 0, kConstants, shader_stage::compute});
@@ -517,6 +620,7 @@ void Tick(effect_runtime* runtime) {
         g_init = InitNgx(dev) ? Init::ok : Init::failed;
         if (g_init == Init::ok && !CreatePipeline(dev)) g_init = Init::failed;
     }
+    if (dev == g_device) FinishCapture();
     if (g_init != Init::ok || dev != g_device || !g_options.enabled) return;
     if (g_wanted.renderW && !FindFeature(g_wanted) && g_wanted != g_failedKey)
         CreateFeature(runtime->get_command_queue(), g_wanted);
@@ -600,6 +704,29 @@ Result Evaluate(const Frame& f) {
     g_statsPending[slot] = true;
     g_statsAge[slot] = age;
 
+    // Texture capture: the game's colour and velocity, and the motion / depth DLSS gets.
+    if (g_captureWanted && g_capture.empty()) {
+        g_captureWanted = false;
+        CaptureTexture(cmd, f.color, resource_usage::shader_resource_non_pixel, "color");
+        CaptureTexture(cmd, f.velocity, resource_usage::shader_resource_non_pixel, "velocity");
+        CaptureTexture(cmd, g_motion, resource_usage::unordered_access, "motion");
+        CaptureTexture(cmd, g_depth, resource_usage::unordered_access, "depth");
+        char h[1024];
+        int n = snprintf(h, sizeof(h),
+                         "frame %llu age %u\nrender %ux%u output %u,%u %ux%u\njitter %.6f %.6f\npreexposure %.6g\n"
+                         "camera_only %d stale_threshold %.3f ignore_velocity %d invert_motion %d\nclip_to_prev_clip",
+                         static_cast<unsigned long long>(f.frame), age, f.renderW, f.renderH, f.outX, f.outY, f.outW,
+                         f.outH, f.jitterX, f.jitterY, f.preExposure, cameraOnly ? 1 : 0, staleThreshold,
+                         g_options.ignoreVelocity ? 1 : 0, g_options.invertMotion ? 1 : 0);
+        for (int i = 0; i < 16 && n > 0 && n < int(sizeof(h)); ++i)
+            n += snprintf(h + n, sizeof(h) - n, " %.9g", f.clipToPrevClip[i]);
+        g_captureHeader = std::string(h) + "\n";
+        g_captureFrame = f.frame;
+        g_captureWait = 6;
+        g_captureStatus = "copied frame " + std::to_string(f.frame) + ", writing...";
+        LOG("capture: copied DLSS inputs of frame %llu (age %u)", static_cast<unsigned long long>(f.frame), age);
+    }
+
     const resource ours[2] = {g_motion, g_depth};
     const resource_usage uav[2] = {resource_usage::unordered_access, resource_usage::unordered_access};
     const resource_usage srv[2] = {resource_usage::shader_resource, resource_usage::shader_resource};
@@ -676,6 +803,14 @@ Result Evaluate(const Frame& f) {
     return Result::done;
 }
 
+void RequestCapture() {
+    if (!g_capture.empty()) return;
+    g_captureWanted = true;
+    g_captureStatus = "waiting for the next DLSS frame";
+}
+
+std::string CaptureStatus() { return g_captureStatus; }
+
 bool PatchLightingHistory(command_list* cmd, resource texture, bool compute, uint64_t frame) {
     if (!g_histOutput.handle || texture.handle != g_histOutput.handle || frame != g_histFrame + 1 ||
         g_histPatchedFrame == frame)
@@ -727,6 +862,7 @@ void Shutdown(device* dev) {
     DestroyTextures(dev);
     DestroyStats(dev);
     DestroyLuma(dev);
+    ReleaseCapture();
     if (g_pso.handle) dev->destroy_pipeline(g_pso);
     if (g_layout.handle) dev->destroy_pipeline_layout(g_layout);
     g_pso = {};

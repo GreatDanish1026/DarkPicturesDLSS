@@ -390,6 +390,14 @@ Frame dump 1705 (0.5.10, kick close-up, 85 frames after a reset that reached DLS
   holding the bright history for seconds.
 - **Remaining DLSS bug: the "Yah!" smear**, from the game's velocity on part of that
   shot (camera-only motion fixes it).
+- The 0.5.15 frame dump mid-"Yah!" (frame 2293, age 84) shows only that the velocity
+  texture (RGBA16_UNORM) comes from scene-geometry draws. Pass lists can't show velocity
+  values. So 0.5.16 adds **Ctrl+F8 "Capture DLSS input textures"**: at the next DLSS
+  frame it copies the game's colour and velocity and our motion and depth to readback
+  buffers. A few presents later it writes `QuarryDLSS_capture_<frame>_<name>.bin`
+  (rows tightly packed) plus a `.txt` header next to the exe. The header has the
+  sizes, DXGI formats, render/output rects, jitter, pre-exposure, guard state and
+  ClipToPrevClip, enough to recompute camera motion per pixel offline.
 
 ### Crash report from a probe 0.3.1 session
 
