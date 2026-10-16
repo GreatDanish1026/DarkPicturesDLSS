@@ -888,6 +888,20 @@ Streamline is only initialised once a swap chain is being created (factory) or e
     texture is skipped.
   - Not yet confirmed: F11 twice with stabilise on.
 
+### Run 10 (1.0.0-fg.9, 2026-10-16 14:51): F11 fixed
+
+- **User report: F11 works with DLSS SR and frame generation on and "Stabilise
+  screen-space lighting" checked.**
+- Log: F11 cycles at 14:51:10-17 (loading) and 24.8 / 25.5 (gameplay). Each resize logged
+  "lighting history copy off for 30 DLSS frames" and, for DLSS-G, "off for a swap chain
+  resize" then "resources freed". No device loss. The "copy cancelled" guard didn't fire
+  here, because the 30-frame hold already covered the double-rendered frame after the
+  resize. It stays as a guard for fallbacks outside resizes.
+- **The F11 hang was a DLSS SR bug, present since the lighting clamp (0.5.12), so also in
+  1.0.0.** 1.1 should ship the fix. Frame generation's resize handling (DLSS-G off around
+  the resize, resources freed, back buffer size from the swap chain) stays as well: it's
+  what NVIDIA's guide asks for, even though it wasn't the cause.
+
 ### Results
 
 | Question | Factory hook | Swap chain upgrade |
@@ -899,7 +913,7 @@ Streamline is only initialised once a swap chain is being created (factory) or e
 | Multi-frame 3x / 4x / Dynamic | 3x: 52 -> 156 fps; 4x: 39 -> 156 fps; Dynamic picks 2x (78 -> 156) | not tested |
 | Pacing (below-SL sd / hitches) | real frames sd ~0.2 ms; output capped near 156 fps; below-SL not measurable in this order | not tested |
 | Subtitles / QTE prompts | no visual issues (checked, run 3) | not tested |
-| Crashes, device removed | none | not tested |
+| Crashes, device removed | F11 hung the GPU (runs 6-8; a DLSS SR lighting-copy bug, fixed in fg.9); none since | not tested |
 
 ### Blockers known before any run
 
