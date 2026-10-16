@@ -6,10 +6,12 @@
 // (Options::hook, from ReShade.ini, restart to change):
 //
 //   factory  The IDXGIFactory vtable (shared by every DXGI factory) is patched so that the
-//            game's CreateSwapChain / CreateSwapChainForHwnd go through an SL factory proxy.
-//            SL wraps whatever ReShade returns: game -> SL -> ReShade -> DXGI. DLSS-G sees
-//            the swap chain created, as it expects, but ReShade then sees every presented
-//            frame, generated ones included (IsRealPresent tells the probe which are real).
+//            swap chain creation goes through an SL factory proxy. ReShade wraps the game's
+//            factory and calls the real one, so the call arrives from ReShade (first test
+//            run) and SL ends up below it: game -> ReShade -> SL -> DXGI. DLSS-G sees the
+//            swap chain created, as it expects. If the call came straight from the game
+//            instead, SL would wrap ReShade's swap chain and ReShade would see generated
+//            frames too (IsRealPresent tells the probe which are real).
 //   upgrade  slUpgradeInterface on the finished swap chain, and the native swap chain's
 //            vtable is patched so that ReShade's calls go to the SL proxy:
 //            game -> ReShade -> SL -> DXGI. DLSS-G never saw the swap chain created, and the
@@ -86,6 +88,13 @@ std::string ModuleName(HMODULE m) {
 
 bool FromGame(const void* ret) { return ModuleOf(ret) == GetModuleHandleW(nullptr); }
 bool FromReShade(const void* ret) { return ModuleOf(ret) == reshade::internal::get_reshade_module_handle(); }
+
+// ReShade and the system DXGI are both "dxgi.dll": say which.
+std::string Caller(const void* ret) {
+    if (FromReShade(ret)) return "ReShade";
+    if (FromGame(ret)) return "the game exe";
+    return ModuleName(ModuleOf(ret));
+}
 
 // Set while we call into an SL proxy, so its calls back into the patched native
 // functions on this thread go straight through.
@@ -169,6 +178,9 @@ uint32_t g_maxFrames = 1;             // DLSSGState::numFramesToGenerateMax
 uint32_t g_dlssgStatus = 0xffffffffu;
 std::atomic<uint64_t> g_realPresents{0};
 uint64_t g_countedPresents = 0;       // real presents the probe has counted (factory hook)
+// The game's CreateSwapChain reached us through ReShade (ReShade wraps the game's factory
+// and calls the real one): Streamline then sits below ReShade, which sees real frames only.
+bool g_reshadeAbove = false;
 uint32_t g_errors = 0;                // logged SL call failures, capped
 
 std::mutex g_statusMutex;  // g_status: set on the game's threads, read by the overlay
@@ -510,9 +522,10 @@ HRESULT STDMETHODCALLTYPE HookCreateSwapChainForHwnd(IDXGIFactory2* self, IUnkno
     const void* ret = _ReturnAddress();
     if (!t_inside && desc)
         LOG("fg: CreateSwapChainForHwnd from %s: %ux%u format %d, %u buffers, swap effect %d, flags 0x%x",
-            ModuleName(ModuleOf(ret)).c_str(), desc->Width, desc->Height, static_cast<int>(desc->Format),
+            Caller(ret).c_str(), desc->Width, desc->Height, static_cast<int>(desc->Format),
             desc->BufferCount, static_cast<int>(desc->SwapEffect), desc->Flags);
-    if (!t_inside && g_options.hook == Hook::factory && FromGame(ret)) {
+    if (!t_inside && g_options.hook == Hook::factory && (FromGame(ret) || FromReShade(ret))) {
+        g_reshadeAbove = FromReShade(ret);
         if (IDXGIFactory2* proxy = SlFactory(self)) {
             HRESULT hr;
             {
@@ -532,9 +545,10 @@ HRESULT STDMETHODCALLTYPE HookCreateSwapChain(IDXGIFactory* self, IUnknown* queu
     const void* ret = _ReturnAddress();
     if (!t_inside && desc)
         LOG("fg: CreateSwapChain from %s: %ux%u format %d, %u buffers, swap effect %d, flags 0x%x",
-            ModuleName(ModuleOf(ret)).c_str(), desc->BufferDesc.Width, desc->BufferDesc.Height,
+            Caller(ret).c_str(), desc->BufferDesc.Width, desc->BufferDesc.Height,
             static_cast<int>(desc->BufferDesc.Format), desc->BufferCount, static_cast<int>(desc->SwapEffect), desc->Flags);
-    if (!t_inside && g_options.hook == Hook::factory && FromGame(ret)) {
+    if (!t_inside && g_options.hook == Hook::factory && (FromGame(ret) || FromReShade(ret))) {
+        g_reshadeAbove = FromReShade(ret);
         if (IDXGIFactory2* proxy = SlFactory(self)) {
             HRESULT hr;
             {
@@ -785,7 +799,7 @@ void Tick() {
 }
 
 bool IsRealPresent() {
-    if (g_options.hook != Hook::factory || !g_slSwapchain) return true;
+    if (g_options.hook != Hook::factory || !g_slSwapchain || g_reshadeAbove) return true;
     {
         std::lock_guard lock(g_mutex);
         Note(g_shown);

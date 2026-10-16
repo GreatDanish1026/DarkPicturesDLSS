@@ -568,11 +568,11 @@ build.
 | | 1: factory hook | 2: swap chain upgrade |
 |---|---|---|
 | How | At `init_device` the add-on patches the shared `IDXGIFactory` vtable (system32 dxgi.dll) slots 10 `CreateSwapChain` and 15 `CreateSwapChainForHwnd`. When the **game exe** creates its swap chain, the call goes through an SL factory proxy (`slUpgradeInterface` on the factory). Streamline's call back down passes through (thread-local guard), so ReShade still wraps the native swap chain. | On the first ReShade present after `init_swapchain`: `slUpgradeInterface` on the native swap chain, then the native swap chain vtable is patched (Present, GetBuffer, SetFullscreenState, ResizeBuffers, Present1, GetCurrentBackBufferIndex, ResizeBuffers1). Calls coming **from ReShade's module** on that swap chain go to the SL proxy; Streamline's own calls go to DXGI. |
-| Order | game -> Streamline -> ReShade -> DXGI | game -> ReShade -> Streamline -> DXGI |
+| Order | game -> ReShade -> Streamline -> DXGI, because ReShade wraps the factory and calls the real one (run 1). It would be game -> Streamline -> ReShade if the game called the real factory directly | game -> ReShade -> Streamline -> DXGI |
 | DLSS-G sees creation | yes | no |
 | Back buffers | Streamline's from the start | The game and ReShade already hold the real ones. Toggle F11 twice (a resize) so they fetch them again through Streamline |
-| ReShade sees | every presented frame, generated ones included. `fg::IsRealPresent` counts one probe frame per game Present, so the DLSS SR frame-gap reset logic still works | real frames only |
-| ReShade overlay | drawn on every presented frame, not interpolated | drawn before Streamline, so it gets interpolated |
+| ReShade sees | real frames only. In the game-first order it would see generated frames too; `fg::IsRealPresent` then counts one probe frame per game Present, so the DLSS SR frame-gap reset logic still works | real frames only |
+| ReShade overlay | drawn before Streamline, so it gets interpolated | drawn before Streamline, so it gets interpolated |
 
 Both strategies restore every patched vtable entry when the add-on unloads. That matters
 because ReShade unloads and reloads the add-on for the throwaway devices at startup.
@@ -614,8 +614,9 @@ Streamline is only initialised once a swap chain is being created (factory) or e
 
 - `fg: settings: ...`, then `patched IDXGIFactory2::CreateSwapChainForHwnd (was <module>+...)`
   (factory) or `swap chain upgraded to an SL proxy` + the seven patches (upgrade).
-- `CreateSwapChainForHwnd from <module>`: it must say the exe for the factory hook to
-  engage. If it says `dxgi.dll`, ReShade is calling in above us.
+- `CreateSwapChain from <caller>`: the caller is "ReShade" (as in run 1) or "the game
+  exe", and either now engages the hook. It should be followed by `CreateSwapChain
+  through Streamline: 0x00000000`.
 - `DLSS-G: loaded 1, supported: eOk, SL 2.14.1, NGX ...`, the requirements line (HW
   scheduling, VSync, driver), and the `sl error/warn` lines from Streamline itself.
 - `DLSS-G status 0x0 ok`, or flags such as `reflex-not-detected` or `constants-invalid`.
@@ -641,6 +642,26 @@ Streamline is only initialised once a swap chain is being created (factory) or e
    RTX 5080.
 5. If the factory hook doesn't engage or crashes: switch to "Swap chain upgrade", restart,
    load in, press F11 twice and check the same things.
+
+### Run 1 (1.0.0-fg.1, factory hook, 2026-10-16 13:45): Streamline never loaded
+
+- User report: no generated frames; lower performance and the GPU not fully used.
+- The log shows why. The factory vtable was patched (the saved originals are
+  `dxgi.dll+0x2c4d0` / `+0x2d8f0`; a standalone test program confirms these are the
+  system DXGI functions, so ReShade doesn't patch that vtable). But the game's one
+  `CreateSwapChain` (legacy, not `ForHwnd`: 3840x2160 R10G10B10A2, 3 buffers, flip-discard,
+  flags 0x802) reached our hook **from ReShade** (ReShade.log "Redirecting
+  IDXGIFactory::CreateSwapChain" at 03.178, ours at 03.226). ReShade wraps the game's
+  factory and then calls the real one. The hook only engaged for calls from the game exe,
+  so it passed the call through: no `slInit`, no tags, no Reflex.
+- So nothing from the experiment ran per frame in this session. The performance drop
+  can't come from Streamline or DLSS-G; that still needs an A/B with the hook off.
+- **1.0.0-fg.2:** the factory hook also engages when ReShade is the caller. That gives
+  game -> ReShade -> Streamline -> DXGI, the best order: Streamline sees the creation and
+  hands out its buffers, ReShade sees only real frames, and ReShade's overlay gets
+  interpolated. Streamline's call back down still passes through (thread-local guard) to
+  the real DXGI function. Log callers now read "ReShade" or "the game exe", since both
+  modules are named dxgi.dll.
 
 ### Results (to fill in from the first run)
 
