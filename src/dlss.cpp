@@ -15,6 +15,7 @@
 
 #include "dlss.hpp"
 #include "fg.hpp"
+#include "version.h"
 
 #include <nvsdk_ngx_helpers_d3d.h>
 
@@ -44,7 +45,7 @@ namespace {
     } while (0)
 
 // NGX project id for this mod (any fixed GUID; identifies the app to NGX).
-constexpr char kProjectId[] = "6c2f3b1e-9d4a-4e57-8b6f-2a1d7c9e0f53";
+constexpr char kProjectId[] = QDLSS_NGX_PROJECT_ID;
 constexpr uint32_t kConstants = 24;  // float4x4 + float2 + float2 + float4 flags
 
 enum class Init { untried, ok, failed };
@@ -424,7 +425,7 @@ void ReleaseCapture() {
 // At present: once the copies are surely done, writes them out.
 void FinishCapture() {
     if (g_capture.empty() || g_captureWait == 0 || --g_captureWait > 0) return;
-    const std::string base = GameDir() + "QuarryDLSS_capture_" + std::to_string(g_captureFrame);
+    const std::string base = GameDir() + QDLSS_PRODUCT "_capture_" + std::to_string(g_captureFrame);
     std::string header = g_captureHeader;
     for (auto& item : g_capture) {
         void* p = nullptr;

@@ -1053,3 +1053,53 @@ Changes from 1.0.0 (details under "Frame Generation spike"):
   after any TAAU fallback and held off for 30 DLSS frames after a swap chain resize.
 - The release zip bundles the NVIDIA runtime: `nvngx_dlss.dll`, `nvngx_dlssg.dll` and the
   five Streamline DLLs, with their licence texts (`build.ps1 -Package`).
+
+## The Dark Pictures Anthology: House of Ashes (DarkPicturesDLSS)
+
+House of Ashes (Steam, `SMG025\Binaries\Win64\HouseOfAshes-Win64-Shipping.exe`, PE timestamp
+`0x62616f1a`) is **UE 4.26** (`++UE4+Release-4.26`), **Direct3D 12** by default (its launcher
+passes `-dx12`), with UE's ray tracing compiled in (RT reflections and AO in its settings). It has
+no upscaler of its own: no DLSS, NGX, FSR or Streamline strings in the exe. Its settings use the
+same SMG schema as The Quarry (`sg.ResolutionQuality`, `RTReflectionsQuality`,
+`bRTAmbientOcclusionEnabled`, `bUseDynamicResolution`). The user's install has ReShade 6.8 and
+the `HoA_NativeRTGI_Baseline_P.pak` mod.
+
+### Probe run with QuarryDLSS 1.1.0 unchanged (2026-10-16 15:20-15:25)
+
+- **DLSS ran straight away** and the frame rate rose accordingly (user report). Same IConsoleManager
+  pattern (singleton at exe+0x6dd2e20), same forced r.ScreenPercentage / r.TemporalAA.Upsampling.
+- **The TAAU is the identical shader binary, `6435b4eb8190e22b`** (50-71% band), with the same
+  bindings. Full-frame gameplay runs 2564x1444 -> 3840x2160. Cutscenes letterbox to **2.35:1**,
+  3840x1634 in a 3840x1636 texture (The Quarry: 2.4:1, 3840x1600). The final colour pass draws at
+  viewport 3840x1634+0+**263**, centred, so frame generation's back buffer subrect is right.
+- **Constants, from the dump (`QuarryDLSS_cbuffers_22607.txt`): every row the add-on reads is where
+  The Quarry has it.**
+  - TAAU cb0: row 27 render rect (2228x948 at Balanced), row 24 output rect, row 28.xy jitter
+    (.zw 0.58 / 1.72).
+  - View: rows 28-31 ViewToClip (focal 1.473, a wider lens than The Quarry's 1.667; near 10 in row
+    31.z; jitter in row 30.xy). Row 18 forward (unit vector), row 67 camera origin. Rows 122-125
+    ClipToPrevClip (identity when still). Row 126 TemporalAAJitter. Row 135.y pre-exposure (2.45).
+- **Motion vectors check out.** In gameplay pans the decoded game velocity matches camera
+  reprojection (10.40 vs 10.45 px, 2.75 vs 2.79 px). Cutscene cuts show the same stale-velocity
+  pattern The Quarry has (reset+2: 65% inflated), which the existing guard handles.
+- **Camera cuts:** 20 resets, every one the game's own flag plus a camera jump of 9-102 m or a turn
+  of up to 145 degrees. Pre-exposure steps on cuts (1, 2, 4, 5.5, 7.3).
+- The stabilised-lighting copy engaged (first copy at frame 391): something reads last frame's DLSS
+  output (r.SSR.Quality 3, and possibly the RTGI mod). r.SSGI.Enable is 0 here.
+- **UI compositing, for later:** pass #140 (PS `1292d977c1e18459`) composites a separate 3840x2160
+  BGRA8 UI texture (`t0`, drawn by passes #137-139) over the finished scene (`t1`, RGB10A2) into the
+  back buffer. Those are the HUD-less colour and UI buffers DLSS-G can use to keep subtitles and
+  prompts out of interpolation.
+
+### DarkPicturesDLSS 0.1.0: a separate product from the same source
+
+- `build.ps1 -Product DarkPictures` defines `QDLSS_DARK_PICTURES`, giving `DarkPicturesDLSS.addon64`
+  with its own add-on name, ReShade.ini section `[DarkPicturesDLSS]`, log and dump file names, NGX
+  project id (`6fe9a2b4-...`), version (0.1.0), README (`docs/README-DarkPictures.md`) and package.
+  Product strings live in `src/version.h`.
+- `src/games.hpp` lists the shipping exes each product is made for (House of Ashes for now). The log
+  says which game it recognised, or that it doesn't know the exe but will try anyway (pass detection
+  is generic, plus the main-TAA-guess fallback for unknown TAAU permutations).
+- Still to test in House of Ashes: frame generation, F11 / fullscreen switches (its saved
+  `FullscreenMode=0` is exclusive fullscreen), Ultra Quality (`2f606fcaa114ea67`), and image quality
+  in RT-heavy scenes.

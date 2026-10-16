@@ -1,7 +1,7 @@
 Third-party notices
 ===================
 
-QuarryDLSS.addon64 is compiled against the following headers, which are
+QuarryDLSS.addon64 and DarkPicturesDLSS.addon64 are compiled against the following headers, which are
 included in the source repository under third_party/. The release package
 also includes NVIDIA runtime files, listed in the last two sections, with
 their licence texts in the licenses/ folder.

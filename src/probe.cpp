@@ -48,13 +48,15 @@
 #include "dlss.hpp"
 #include "dxbc.hpp"
 #include "fg.hpp"
+#include "games.hpp"
 #include "version.h"
 
 #pragma comment(lib, "dxgi.lib")
 
-extern "C" __declspec(dllexport) const char* NAME = "QuarryDLSS";
+extern "C" __declspec(dllexport) const char* NAME = QDLSS_PRODUCT;
 extern "C" __declspec(dllexport) const char* DESCRIPTION =
-    "NVIDIA DLSS Super Resolution for The Quarry (DirectX 12), in place of the game's temporal upscaler.";
+    "NVIDIA DLSS Super Resolution and Frame Generation for " QDLSS_GAMES
+    " (DirectX 12), in place of the game's temporal upscaler.";
 
 namespace {
 
@@ -94,8 +96,8 @@ void OpenLog() {
     if (!n || n >= MAX_PATH) return;
     g_dir.assign(path, n);
     g_dir.resize(g_dir.find_last_of(L"\\/") + 1);
-    std::wstring log = g_dir + L"QuarryDLSS.log";
-    std::wstring prev = g_dir + L"QuarryDLSS.prev.log";
+    std::wstring log = g_dir + L"" QDLSS_PRODUCT ".log";
+    std::wstring prev = g_dir + L"" QDLSS_PRODUCT ".prev.log";
     // ReShade loads and unloads the add-on for each device the game creates at
     // startup, so only the first load in a process starts a new log.
     if (GetEnvironmentVariableW(L"QDLSS_LOG_OPEN", nullptr, 0) == 0) {
@@ -113,14 +115,25 @@ std::string Narrow(const wchar_t* s) {
 }
 
 // Executable identity, for the per-build table the real mod will need.
+const char* g_game = nullptr;  // the kGames entry this executable matches
+
 void LogGameInfo() {
     wchar_t path[MAX_PATH];
     GetModuleFileNameW(nullptr, path, MAX_PATH);
     auto base = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
     auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
     auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-    Log("QuarryDLSS %s", QDLSS_VERSION);
+    Log("%s %s", QDLSS_PRODUCT, QDLSS_VERSION);
     Log("exe: %s", Narrow(path).c_str());
+    const wchar_t* file = wcsrchr(path, L'\\');
+    file = file ? file + 1 : path;
+    for (const GameInfo& g : kGames)
+        if (_wcsicmp(file, g.exe) == 0) g_game = g.name;
+    if (g_game)
+        Log("game: %s", g_game);
+    else
+        Log("game: not one %s is made for (%s); it may still find the game's upscaler", QDLSS_PRODUCT,
+            Narrow(file).c_str());
     Log("exe: PE timestamp 0x%08lx, image size 0x%lx", static_cast<unsigned long>(nt->FileHeader.TimeDateStamp),
         static_cast<unsigned long>(nt->OptionalHeader.SizeOfImage));
     Log("command line: %s", Narrow(GetCommandLineW()).c_str());
@@ -674,10 +687,10 @@ void UpdateMainGuess() {
 
 void WriteDump() {
     wchar_t name[64];
-    swprintf(name, 64, L"QuarryDLSS_frame_%llu.txt", static_cast<unsigned long long>(g_dumpFrame));
+    swprintf(name, 64, L"" QDLSS_PRODUCT "_frame_%llu.txt", static_cast<unsigned long long>(g_dumpFrame));
     std::wstring path = g_dir + name;
     if (FILE* f = _wfopen(path.c_str(), L"w")) {
-        fprintf(f, "QuarryDLSS %s - frame %llu\nAPI: %s\nadapter: %s\nswap chain: %s\n\n", QDLSS_VERSION,
+        fprintf(f, QDLSS_PRODUCT " %s - frame %llu\nAPI: %s\nadapter: %s\nswap chain: %s\n\n", QDLSS_VERSION,
                 static_cast<unsigned long long>(g_dumpFrame), ApiName(g_api), g_adapter.c_str(),
                 g_swapchain.c_str());
         fprintf(f, "render scale: %s\n\n", RenderScaleStatus().c_str());
@@ -1331,10 +1344,10 @@ bool OnCopyResource(command_list* cmd, resource src, resource dst) {
 
 void WriteCbDump() {
     wchar_t name[64];
-    swprintf(name, 64, L"QuarryDLSS_cbuffers_%llu.txt", static_cast<unsigned long long>(g_cbDumpFirst));
+    swprintf(name, 64, L"" QDLSS_PRODUCT "_cbuffers_%llu.txt", static_cast<unsigned long long>(g_cbDumpFirst));
     std::wstring path = g_dir + name;
     if (FILE* f = _wfopen(path.c_str(), L"w")) {
-        fprintf(f, "QuarryDLSS %s - constant buffers, frames %llu-%llu\nswap chain: %s\n\n", QDLSS_VERSION,
+        fprintf(f, QDLSS_PRODUCT " %s - constant buffers, frames %llu-%llu\nswap chain: %s\n\n", QDLSS_VERSION,
                 static_cast<unsigned long long>(g_cbDumpFirst), static_cast<unsigned long long>(g_cbDumpLast),
                 g_swapchain.c_str());
         fprintf(f, "render scale: %s\n\n", RenderScaleStatus().c_str());
@@ -1540,9 +1553,9 @@ void OnReshadePresent(effect_runtime* rt) {
     }
 }
 
-// ---- settings, saved in ReShade.ini under [QuarryDLSS] ----
+// ---- settings, saved in ReShade.ini under [QuarryDLSS] (or [DarkPicturesDLSS]) ----
 
-constexpr char kConfigSection[] = "QuarryDLSS";
+constexpr char kConfigSection[] = QDLSS_PRODUCT;
 
 void LoadSettings() {
     auto& o = dlss::g_options;
@@ -1589,7 +1602,7 @@ std::string FriendlyStatus() {
         return buf;
     }
     if (st.rfind("ready", 0) == 0 || st.rfind("waiting", 0) == 0) return "Starting: load into the game.";
-    return "Not active: " + st + " (see QuarryDLSS.log).";
+    return "Not active: " + st + " (see " QDLSS_PRODUCT ".log).";
 }
 
 // Everything a bug report or a test run needs; collapsed by default.
@@ -1661,7 +1674,8 @@ void DrawDiagnostics() {
     ImGui::TextWrapped("Pacing: %s", fg::Pacing().c_str());
     if (ImGui::Checkbox("Streamline copies motion vectors and depth when tagged", &fg::g_options.copyTags))
         fg::SaveSettings();
-    ImGui::TextUnformatted("Log: QuarryDLSS.log next to the game executable.");
+    ImGui::Text("Game: %s", g_game ? g_game : "not recognised");
+    ImGui::TextUnformatted("Log: " QDLSS_PRODUCT ".log next to the game executable.");
 }
 
 // Frame generation (fg.cpp), next to the DLSS choices: it needs DLSS Super Resolution running.
@@ -1706,7 +1720,7 @@ void DrawOverlay(effect_runtime*) {
         for (int i = 0; i < 6; ++i)
             if (presetValues[i] == o.preset) current = i;
         if (ImGui::Combo("DLSS model", &current, presetNames, 6)) o.preset = presetValues[current];
-        ImGui::TextWrapped("An NVIDIA App DLSS model override for The Quarry replaces this. "
+        ImGui::TextWrapped("An NVIDIA App DLSS model override for the game replaces this. "
                            "K can smear some close-ups; J is recommended.");
         if (ImGui::SliderFloat("Custom render scale", &g_forcePercentage, 33.0f, 100.0f, "%.0f%%"))
             g_quality = kCustomQuality;
@@ -1770,11 +1784,11 @@ void Install() {
     reshade::register_event<reshade::addon_event::reshade_present>(&OnReshadePresent);
     LoadSettings();
     fg::LoadSettings();
-    reshade::register_overlay("QuarryDLSS", &DrawOverlay);
+    reshade::register_overlay(QDLSS_PRODUCT, &DrawOverlay);
 }
 
 void Uninstall() {
-    reshade::unregister_overlay("QuarryDLSS", &DrawOverlay);
+    reshade::unregister_overlay(QDLSS_PRODUCT, &DrawOverlay);
     fg::Shutdown();
     if (g_log) {
         Log("unloading");

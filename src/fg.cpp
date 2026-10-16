@@ -23,6 +23,7 @@
 #include <intrin.h>
 
 #include "fg.hpp"
+#include "version.h"
 
 #include <sl.h>
 #include <sl_helpers.h>
@@ -49,9 +50,9 @@ namespace {
         if (g_log) g_log(__VA_ARGS__); \
     } while (0)
 
-constexpr char kSection[] = "QuarryDLSS";
+constexpr char kSection[] = QDLSS_PRODUCT;
 // Same id as the NGX project id in dlss.cpp.
-constexpr char kProjectId[] = "6c2f3b1e-9d4a-4e57-8b6f-2a1d7c9e0f53";
+constexpr char kProjectId[] = QDLSS_NGX_PROJECT_ID;
 // The Streamline runtime the user copies next to the game exe (build.ps1 -InstallStreamline).
 const wchar_t* const kFiles[] = {L"sl.interposer.dll", L"sl.common.dll", L"sl.dlss_g.dll",
                                  L"sl.reflex.dll",     L"sl.pcl.dll",    L"nvngx_dlssg.dll"};
