@@ -51,9 +51,9 @@
 
 #pragma comment(lib, "dxgi.lib")
 
-extern "C" __declspec(dllexport) const char* NAME = "QuarryDLSS probe";
+extern "C" __declspec(dllexport) const char* NAME = "QuarryDLSS";
 extern "C" __declspec(dllexport) const char* DESCRIPTION =
-    "Logs The Quarry's graphics API and its temporal anti-aliasing pass (inputs and outputs).";
+    "NVIDIA DLSS Super Resolution for The Quarry (DirectX 12), in place of the game's temporal upscaler.";
 
 namespace {
 
@@ -118,7 +118,7 @@ void LogGameInfo() {
     auto base = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
     auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
     auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-    Log("QuarryDLSS probe %s", QDLSS_VERSION);
+    Log("QuarryDLSS %s", QDLSS_VERSION);
     Log("exe: %s", Narrow(path).c_str());
     Log("exe: PE timestamp 0x%08lx, image size 0x%lx", static_cast<unsigned long>(nt->FileHeader.TimeDateStamp),
         static_cast<unsigned long>(nt->OptionalHeader.SizeOfImage));
@@ -676,7 +676,7 @@ void WriteDump() {
     swprintf(name, 64, L"QuarryDLSS_frame_%llu.txt", static_cast<unsigned long long>(g_dumpFrame));
     std::wstring path = g_dir + name;
     if (FILE* f = _wfopen(path.c_str(), L"w")) {
-        fprintf(f, "QuarryDLSS probe %s - frame %llu\nAPI: %s\nadapter: %s\nswap chain: %s\n\n", QDLSS_VERSION,
+        fprintf(f, "QuarryDLSS %s - frame %llu\nAPI: %s\nadapter: %s\nswap chain: %s\n\n", QDLSS_VERSION,
                 static_cast<unsigned long long>(g_dumpFrame), ApiName(g_api), g_adapter.c_str(),
                 g_swapchain.c_str());
         fprintf(f, "render scale: %s\n\n", RenderScaleStatus().c_str());
@@ -1247,7 +1247,7 @@ bool OnDispatch(command_list* cmd, uint32_t x, uint32_t y, uint32_t z) {
     const bool built = BuildDlssFrame(cmd, st, f, why);
     // The game's pre-exposure, with DLSS on or off: is a jump at a cut the game's own?
     static float loggedPre = 0.0f;
-    if (built && (f.preExposure > loggedPre * 1.25f || f.preExposure < loggedPre * 0.8f)) {
+    if (built && dlss::g_options.verboseLog && (f.preExposure > loggedPre * 1.25f || f.preExposure < loggedPre * 0.8f)) {
         Log("pre-exposure %.4g at frame %llu (DLSS %s)%s", f.preExposure, static_cast<unsigned long long>(g_frame),
             dlss::g_options.enabled ? "on" : "off", f.reset ? ", camera cut" : "");
         loggedPre = f.preExposure;
@@ -1307,7 +1307,7 @@ void WriteCbDump() {
     swprintf(name, 64, L"QuarryDLSS_cbuffers_%llu.txt", static_cast<unsigned long long>(g_cbDumpFirst));
     std::wstring path = g_dir + name;
     if (FILE* f = _wfopen(path.c_str(), L"w")) {
-        fprintf(f, "QuarryDLSS probe %s - constant buffers, frames %llu-%llu\nswap chain: %s\n\n", QDLSS_VERSION,
+        fprintf(f, "QuarryDLSS %s - constant buffers, frames %llu-%llu\nswap chain: %s\n\n", QDLSS_VERSION,
                 static_cast<unsigned long long>(g_cbDumpFirst), static_cast<unsigned long long>(g_cbDumpLast),
                 g_swapchain.c_str());
         fprintf(f, "render scale: %s\n\n", RenderScaleStatus().c_str());
@@ -1363,7 +1363,20 @@ float g_originalPercentage = 100.0f;
 int32_t g_originalUpsampling = 0;
 bool g_forceScale = true;
 bool g_forcing = false;  // values currently overwritten
-float g_forcePercentage = 67.0f;
+float g_forcePercentage = 66.7f;
+bool g_keepScaleWhenOff = false;  // diagnostics: keep the forced scale with DLSS off (TAAU comparison)
+bool g_debugHotkeys = false;      // Ctrl+F8 / F9 / F10 captures and dumps
+
+// Quality modes: render scale per axis, as DLSS defines them. "Custom" = the Advanced slider.
+struct QualityMode {
+    const char* name;
+    float percentage;
+};
+const QualityMode kQualityModes[] = {
+    {"Quality (67%)", 66.7f}, {"Balanced (58%)", 58.0f}, {"Performance (50%)", 50.0f},
+    {"Ultra Performance (33%)", 33.3f}, {"Custom", 0.0f}};
+constexpr int kCustomQuality = 4;
+int g_quality = 0;
 uint32_t g_foreignWrites = 0;  // times the game changed a forced value
 
 void FindCvars() {
@@ -1405,7 +1418,8 @@ void ApplyRenderScale() {
     if (g_cvarState != CvarState::ready) return;
     float* sp = g_screenPercentage;
     int32_t* up = g_taaUpsampling;
-    if (!g_forceScale) {
+    // DLSS off: the game's own render scale and TAA, unless kept for a comparison.
+    if (!g_forceScale || !(dlss::g_options.enabled || g_keepScaleWhenOff)) {
         if (g_forcing) {  // give the game its own values back
             sp[0] = sp[1] = g_originalPercentage;
             up[0] = up[1] = g_originalUpsampling;
@@ -1415,11 +1429,12 @@ void ApplyRenderScale() {
         }
         return;
     }
-    if (g_forcing && (sp[0] != g_forcePercentage || up[0] != 1) && ++g_foreignWrites <= 10)
+    static float written = 0.0f;  // what we last wrote: a quality change isn't the game's doing
+    if (g_forcing && (sp[0] != written || up[0] != 1) && ++g_foreignWrites <= 10)
         Log("cvars: the game changed a forced value: r.ScreenPercentage %g / %g, r.TemporalAA.Upsampling %d / %d%s",
             sp[0], sp[1], up[0], up[1], g_foreignWrites == 10 ? " (not logging further changes)" : "");
     if (!g_forcing) Log("cvars: forcing r.ScreenPercentage %g and r.TemporalAA.Upsampling 1", g_forcePercentage);
-    sp[0] = sp[1] = g_forcePercentage;
+    sp[0] = sp[1] = written = g_forcePercentage;
     up[0] = up[1] = 1;
     g_forcing = true;
 }
@@ -1486,41 +1501,108 @@ void OnReshadePresent(effect_runtime* rt) {
     ApplyRenderScale();
     ApplyOverrides();
     dlss::Tick(rt);
-    if (rt->is_key_down(VK_CONTROL) && rt->is_key_pressed(VK_F9)) RequestDump();  // not F11: UE toggles fullscreen on it
-    if (rt->is_key_down(VK_CONTROL) && rt->is_key_pressed(VK_F10)) RequestCbDump();
-    if (rt->is_key_down(VK_CONTROL) && rt->is_key_pressed(VK_F8)) dlss::RequestCapture(rt->is_key_down(VK_SHIFT));
+    if (g_debugHotkeys && rt->is_key_down(VK_CONTROL)) {
+        if (rt->is_key_pressed(VK_F9)) RequestDump();  // not F11: UE toggles fullscreen on it
+        if (rt->is_key_pressed(VK_F10)) RequestCbDump();
+        if (rt->is_key_pressed(VK_F8)) dlss::RequestCapture(rt->is_key_down(VK_SHIFT));
+    }
 }
 
-void DrawOverlay(effect_runtime*) {
-    std::lock_guard lock(g_mutex);
+// ---- settings, saved in ReShade.ini under [QuarryDLSS] ----
+
+constexpr char kConfigSection[] = "QuarryDLSS";
+
+void LoadSettings() {
+    auto& o = dlss::g_options;
+    reshade::get_config_value(nullptr, kConfigSection, "Enabled", o.enabled);
+    int quality = g_quality;
+    if (reshade::get_config_value(nullptr, kConfigSection, "QualityMode", quality) && quality >= 0 &&
+        quality <= kCustomQuality)
+        g_quality = quality;
+    float custom = g_forcePercentage;
+    if (reshade::get_config_value(nullptr, kConfigSection, "CustomScale", custom) && custom >= 33.0f && custom <= 100.0f)
+        g_forcePercentage = custom;
+    if (g_quality != kCustomQuality) g_forcePercentage = kQualityModes[g_quality].percentage;
+    unsigned int preset = o.preset;
+    if (reshade::get_config_value(nullptr, kConfigSection, "Preset", preset)) o.preset = preset;
+    reshade::get_config_value(nullptr, kConfigSection, "StabiliseLighting", o.clampLightingHistory);
+    Log("settings: DLSS %s, %s, render scale %.1f%%, preset %u, stabilise lighting %d", o.enabled ? "on" : "off",
+        kQualityModes[g_quality].name, g_forcePercentage, o.preset, o.clampLightingHistory);
+}
+
+void SaveSettings() {
+    const auto& o = dlss::g_options;
+    reshade::set_config_value(nullptr, kConfigSection, "Enabled", o.enabled);
+    reshade::set_config_value(nullptr, kConfigSection, "QualityMode", g_quality);
+    reshade::set_config_value(nullptr, kConfigSection, "CustomScale", g_forcePercentage);
+    reshade::set_config_value(nullptr, kConfigSection, "Preset", static_cast<unsigned int>(o.preset));
+    reshade::set_config_value(nullptr, kConfigSection, "StabiliseLighting", o.clampLightingHistory);
+}
+
+// One plain line for the overlay.
+std::string FriendlyStatus() {
+    if (!dlss::g_options.enabled) return "Off: the game's own anti-aliasing at native resolution.";
+    if (g_haveDevice && g_api != device_api::d3d12)
+        return "Not available: DLSS needs DirectX 12. Add -dx12 to the game's launch options.";
+    const std::string st = dlss::Status();
+    unsigned rw, rh, ow, oh;
+    if (sscanf(st.c_str(), "running: %ux%u -> %ux%u", &rw, &rh, &ow, &oh) == 4) {
+        char buf[96];
+        snprintf(buf, sizeof(buf), "Active: %ux%u upscaled to %ux%u.", rw, rh, ow, oh);
+        return buf;
+    }
+    if (st.rfind("ready", 0) == 0 || st.rfind("waiting", 0) == 0) return "Starting: load into the game.";
+    return "Not active: " + st + " (see QuarryDLSS.log).";
+}
+
+// Everything a bug report or a test run needs; collapsed by default.
+void DrawDiagnostics() {
     ImGui::Text("API: %s", g_haveDevice ? ApiName(g_api) : "(no device yet)");
     if (!g_adapter.empty()) ImGui::Text("Adapter: %s", g_adapter.c_str());
-    ImGui::Text("Swap chain: %s", g_swapchain.c_str());
-    ImGui::Text("Frame %llu", static_cast<unsigned long long>(g_frame));
-    ImGui::Separator();
+    ImGui::Text("Swap chain: %s, frame %llu", g_swapchain.c_str(), static_cast<unsigned long long>(g_frame));
+    ImGui::Text("DLSS: %s", dlss::Status().c_str());
     switch (g_cvarState) {
         case CvarState::ready:
-            ImGui::Checkbox("Force render scale + TAA upsampling", &g_forceScale);
-            ImGui::SliderFloat("Screen percentage", &g_forcePercentage, 33.0f, 100.0f, "%.0f%%");
-            for (auto& o : g_overrides)
-                if (o.data) ImGui::Checkbox(o.label, &o.enabled);
             ImGui::Text("Now: r.ScreenPercentage %.1f, r.TemporalAA.Upsampling %d (game's own: %.0f, %d)",
                         g_screenPercentage[0], g_taaUpsampling[0], g_originalPercentage, g_originalUpsampling);
             if (g_foreignWrites) ImGui::Text("The game changed the forced values %u time(s), see the log.", g_foreignWrites);
+            ImGui::Checkbox("Force the render scale", &g_forceScale);
+            ImGui::Checkbox("Keep the render scale with DLSS off (compare with the game's TAAU)", &g_keepScaleWhenOff);
+            for (auto& o : g_overrides)
+                if (o.data) ImGui::Checkbox(o.label, &o.enabled);
             break;
         case CvarState::failed: ImGui::TextUnformatted("Render scale: console variables not found (see log)."); break;
         default: ImGui::TextUnformatted("Render scale: waiting for the engine..."); break;
     }
     ImGui::Separator();
-    if (g_mainKey) {
-        ImGui::Text("Main TAA guess: %016llx", static_cast<unsigned long long>(g_mainKey));
-        ImGui::Text("Input %ux%u -> output %ux%u (%.1f%%)", g_mainInW, g_mainInH, g_mainOutW, g_mainOutH,
-                    g_mainOutW ? 100.0 * g_mainInW / g_mainOutW : 0.0);
-    } else {
-        ImGui::TextUnformatted("No temporal pass found yet. Load into gameplay.");
-    }
+    auto& o = dlss::g_options;
+    ImGui::Checkbox("Pass the game's pre-exposure to DLSS", &o.passPreExposure);
+    ImGui::Checkbox("Use the game's exposure, not DLSS auto exposure", &o.gameExposure);
+    ImGui::Checkbox("Flip jitter X", &o.flipJitterX);
+    ImGui::SameLine();
+    ImGui::Checkbox("Flip jitter Y", &o.flipJitterY);
+    ImGui::SameLine();
+    ImGui::Checkbox("Motion vectors include jitter", &o.mvJittered);
+    ImGui::Checkbox("Invert motion vectors (test)", &o.invertMotion);
+    ImGui::Checkbox("Ignore game velocity, camera motion only (test)", &o.ignoreVelocity);
+    ImGui::Text("Lighting history copies: %llu", static_cast<unsigned long long>(dlss::LightingHistoryPatches()));
     ImGui::Separator();
-
+    ImGui::Checkbox("Verbose log (motion statistics, pre-exposure changes)", &o.verboseLog);
+    ImGui::Checkbox("Log brightness every frame (input / DLSS / clamped luma)", &o.logBrightness);
+    ImGui::Checkbox("Debug hotkeys: Ctrl+F9 frame dump, Ctrl+F10 constants, Ctrl+F8 texture capture", &g_debugHotkeys);
+    if (ImGui::Button(g_dumpFrame ? "Capturing..." : "Dump next frame")) RequestDump();
+    ImGui::SameLine();
+    if (ImGui::Button(g_cbDumpFirst ? "Capturing constants..." : "Dump TAA constants (8 frames)")) RequestCbDump();
+    if (ImGui::Button("Capture DLSS textures")) dlss::RequestCapture();
+    ImGui::SameLine();
+    if (ImGui::Button("Capture 45 frames into the next shot")) dlss::RequestCapture(true);
+    if (!g_lastDumpFile.empty()) ImGui::Text("Last dump: %s", g_lastDumpFile.c_str());
+    if (!g_lastCbDumpFile.empty()) ImGui::Text("Last constants dump: %s", g_lastCbDumpFile.c_str());
+    if (!dlss::CaptureStatus().empty()) ImGui::Text("Capture: %s", dlss::CaptureStatus().c_str());
+    ImGui::Separator();
+    if (g_mainKey)
+        ImGui::Text("Main TAA: %016llx, %ux%u -> %ux%u (%.1f%%)", static_cast<unsigned long long>(g_mainKey), g_mainInW,
+                    g_mainInH, g_mainOutW, g_mainOutH, g_mainOutW ? 100.0 * g_mainInW / g_mainOutW : 0.0);
     std::vector<const Candidate*> list;
     for (const auto& [k, c] : g_candidates) list.push_back(&c);
     std::sort(list.begin(), list.end(), [](const Candidate* a, const Candidate* b) {
@@ -1533,62 +1615,59 @@ void DrawOverlay(effect_runtime*) {
                     static_cast<unsigned long long>(c->key), c->inW, c->inH, c->outW, c->outH,
                     static_cast<unsigned long long>(c->hits));
     }
-    ImGui::Separator();
-    if (ImGui::Button(g_dumpFrame ? "Capturing..." : "Dump next frame (Ctrl+F9)")) RequestDump();
-    if (!g_lastDumpFile.empty()) ImGui::Text("Last dump: %s", g_lastDumpFile.c_str());
-    if (ImGui::Button("Capture DLSS input textures (Ctrl+F8)")) dlss::RequestCapture();
-    ImGui::SameLine();
-    if (ImGui::Button("45 frames after the next cut (Ctrl+Shift+F8)")) dlss::RequestCapture(true);
-    if (!dlss::CaptureStatus().empty()) ImGui::Text("Capture: %s", dlss::CaptureStatus().c_str());
-    if (ImGui::Button(g_cbDumpFirst ? "Capturing constants..." : "Dump TAA constants, 8 frames (Ctrl+F10)"))
-        RequestCbDump();
-    if (!g_lastCbDumpFile.empty()) ImGui::Text("Last constants dump: %s", g_lastCbDumpFile.c_str());
-    ImGui::Separator();
-    ImGui::Checkbox("DLSS Super Resolution (replaces the game's TAAU, D3D12 only)", &dlss::g_options.enabled);
-    ImGui::Text("DLSS: %s", dlss::Status().c_str());
-    ImGui::Checkbox("Flip jitter X", &dlss::g_options.flipJitterX);
-    ImGui::SameLine();
-    ImGui::Checkbox("Flip jitter Y", &dlss::g_options.flipJitterY);
-    ImGui::SameLine();
-    ImGui::Checkbox("Motion vectors include jitter", &dlss::g_options.mvJittered);
-    ImGui::Checkbox("Invert motion vectors (test)", &dlss::g_options.invertMotion);
-    ImGui::Checkbox("Ignore game velocity, camera motion only (test)", &dlss::g_options.ignoreVelocity);
-    ImGui::Checkbox("Clamp lighting history for SSGI/SSR (test)", &dlss::g_options.clampLightingHistory);
-    ImGui::SameLine();
-    ImGui::Text("(%llu copies)", static_cast<unsigned long long>(dlss::LightingHistoryPatches()));
-    ImGui::Checkbox("Pass the game's pre-exposure to DLSS", &dlss::g_options.passPreExposure);
-    ImGui::Checkbox("Use the game's exposure, not DLSS auto exposure", &dlss::g_options.gameExposure);
-    {
-        static const char* names[] = {"Default", "E (CNN)", "J", "K", "L", "M"};
-        static const uint32_t values[] = {0, 5, 10, 11, 12, 13};
-        int current = 0;
-        for (int i = 0; i < 6; ++i)
-            if (values[i] == dlss::g_options.preset) current = i;
-        if (ImGui::Combo("DLSS model preset (an NVIDIA App override wins)", &current, names, 6))
-            dlss::g_options.preset = values[current];
-    }
-    ImGui::Checkbox("Log brightness every frame (input / DLSS / clamped luma)", &dlss::g_options.logBrightness);
-
-    // Record option changes, so a test run can be read back from the log.
-    static dlss::Options logged = dlss::g_options;
-    const dlss::Options& o = dlss::g_options;
-    if (o.enabled != logged.enabled || o.flipJitterX != logged.flipJitterX || o.flipJitterY != logged.flipJitterY ||
-        o.mvJittered != logged.mvJittered || o.invertMotion != logged.invertMotion ||
-        o.ignoreVelocity != logged.ignoreVelocity || o.clampLightingHistory != logged.clampLightingHistory ||
-        o.passPreExposure != logged.passPreExposure || o.gameExposure != logged.gameExposure || o.preset != logged.preset ||
-        o.logBrightness != logged.logBrightness) {
-        Log("options at frame %llu: DLSS %s, flip jitter X %d Y %d, MVs jittered %d, invert MVs %d, ignore velocity %d, clamp lighting history %d, pre-exposure %d, game exposure %d, preset %u, log brightness %d",
-            static_cast<unsigned long long>(g_frame), o.enabled ? "on" : "off", o.flipJitterX, o.flipJitterY,
-            o.mvJittered, o.invertMotion, o.ignoreVelocity, o.clampLightingHistory, o.passPreExposure, o.gameExposure, o.preset, o.logBrightness);
-        logged = o;
-    }
     if (g_api == device_api::d3d12)
         ImGui::Text("D3D12: %zu root signatures, %zu heaps, %llu descriptor writes, %llu copied, %zu mapped buffers",
                     g_layouts.size(), g_heaps.size(), static_cast<unsigned long long>(g_descriptorWrites),
                     static_cast<unsigned long long>(g_descriptorCopies), g_mapped.size());
-    else
-        ImGui::Text("Constant buffers tracked: %zu", g_cbSize.size());
     ImGui::TextUnformatted("Log: QuarryDLSS.log next to the game executable.");
+}
+
+void DrawOverlay(effect_runtime*) {
+    std::lock_guard lock(g_mutex);
+    auto& o = dlss::g_options;
+    ImGui::Checkbox("DLSS Super Resolution", &o.enabled);
+    ImGui::TextWrapped("%s", FriendlyStatus().c_str());
+
+    const char* names[kCustomQuality + 1];
+    for (int i = 0; i <= kCustomQuality; ++i) names[i] = kQualityModes[i].name;
+    if (ImGui::Combo("Quality mode", &g_quality, names, kCustomQuality + 1) && g_quality != kCustomQuality)
+        g_forcePercentage = kQualityModes[g_quality].percentage;
+
+    if (ImGui::CollapsingHeader("Advanced")) {
+        static const char* presetNames[] = {"J (recommended)", "K", "L", "M", "E (older CNN model)", "Driver default"};
+        static const uint32_t presetValues[] = {10, 11, 12, 13, 5, 0};
+        int current = 0;
+        for (int i = 0; i < 6; ++i)
+            if (presetValues[i] == o.preset) current = i;
+        if (ImGui::Combo("DLSS model", &current, presetNames, 6)) o.preset = presetValues[current];
+        ImGui::TextWrapped("An NVIDIA App DLSS model override for The Quarry replaces this. "
+                           "K can smear some close-ups; J is recommended.");
+        if (ImGui::SliderFloat("Custom render scale", &g_forcePercentage, 33.0f, 100.0f, "%.0f%%"))
+            g_quality = kCustomQuality;
+        ImGui::Checkbox("Stabilise screen-space lighting (SSGI/SSR mods)", &o.clampLightingHistory);
+    }
+    if (ImGui::CollapsingHeader("Diagnostics")) DrawDiagnostics();
+
+    // Save settings, and record option changes so a test run can be read back from the log.
+    static dlss::Options logged = o;
+    static int loggedQuality = g_quality;
+    static float loggedScale = g_forcePercentage;
+    if (o.enabled != logged.enabled || o.flipJitterX != logged.flipJitterX || o.flipJitterY != logged.flipJitterY ||
+        o.mvJittered != logged.mvJittered || o.invertMotion != logged.invertMotion ||
+        o.ignoreVelocity != logged.ignoreVelocity || o.clampLightingHistory != logged.clampLightingHistory ||
+        o.passPreExposure != logged.passPreExposure || o.gameExposure != logged.gameExposure || o.preset != logged.preset ||
+        o.logBrightness != logged.logBrightness || o.verboseLog != logged.verboseLog || g_quality != loggedQuality ||
+        g_forcePercentage != loggedScale) {
+        Log("options at frame %llu: DLSS %s, %s %.1f%%, preset %u, stabilise lighting %d, pre-exposure %d, game exposure %d, "
+            "flip jitter X %d Y %d, MVs jittered %d, invert MVs %d, ignore velocity %d, verbose log %d, log brightness %d",
+            static_cast<unsigned long long>(g_frame), o.enabled ? "on" : "off", kQualityModes[g_quality].name,
+            g_forcePercentage, o.preset, o.clampLightingHistory, o.passPreExposure, o.gameExposure, o.flipJitterX,
+            o.flipJitterY, o.mvJittered, o.invertMotion, o.ignoreVelocity, o.verboseLog, o.logBrightness);
+        logged = o;
+        loggedQuality = g_quality;
+        loggedScale = g_forcePercentage;
+        SaveSettings();
+    }
 }
 
 void Install() {
@@ -1622,11 +1701,12 @@ void Install() {
     reshade::register_event<reshade::addon_event::copy_resource>(&OnCopyResource);
     reshade::register_event<reshade::addon_event::present>(&OnPresent);
     reshade::register_event<reshade::addon_event::reshade_present>(&OnReshadePresent);
-    reshade::register_overlay("QuarryDLSS probe", &DrawOverlay);
+    LoadSettings();
+    reshade::register_overlay("QuarryDLSS", &DrawOverlay);
 }
 
 void Uninstall() {
-    reshade::unregister_overlay("QuarryDLSS probe", &DrawOverlay);
+    reshade::unregister_overlay("QuarryDLSS", &DrawOverlay);
     if (g_log) {
         Log("unloading");
         fclose(g_log);

@@ -2,6 +2,6 @@
 #pragma once
 
 #define QDLSS_VERSION_MAJOR 0
-#define QDLSS_VERSION_MINOR 5
-#define QDLSS_VERSION_PATCH 23
-#define QDLSS_VERSION "0.5.23-dlss-test"
+#define QDLSS_VERSION_MINOR 6
+#define QDLSS_VERSION_PATCH 0
+#define QDLSS_VERSION "0.6.0"

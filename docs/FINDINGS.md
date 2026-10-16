@@ -484,6 +484,34 @@ Frame dump 1705 (0.5.10, kick close-up, 85 frames after a reset that reached DLS
   clamp is needed now that the real causes are fixed, and turning the probe into a
   release build (diagnostics off by default, smaller log).
 
+### 0.6.0: release build
+
+DLSS behaves as in 0.5.23. User-facing changes:
+
+- **Overlay:** "QuarryDLSS" (formerly "QuarryDLSS probe"). The top level shows only:
+  - DLSS on/off;
+  - a plain status line ("Active: 2576x1072 upscaled to 3840x1600.", "Starting: load
+    into the game.", "Not available: DLSS needs DirectX 12...");
+  - a quality mode: Quality 66.7%, Balanced 58%, Performance 50%, Ultra Performance
+    33.3%, or Custom.
+
+  **Advanced** has the DLSS model (J recommended, then K, L, M, E, driver default), the
+  custom render scale and "Stabilise screen-space lighting" (the clamped history).
+  Everything else moved to a collapsed **Diagnostics** section.
+- **Settings are saved** in ReShade.ini, `[QuarryDLSS]`: Enabled, QualityMode,
+  CustomScale, Preset, StabiliseLighting.
+- **DLSS off now restores the game's own render scale** (native TAA). The old behaviour,
+  67% with the game's TAAU, is the Diagnostics option "Keep the render scale with DLSS
+  off".
+- **Quieter log:** the per-frame brightness log, the reset+N and 60-frame motion
+  statistics and the pre-exposure lines are off by default (Diagnostics: "Verbose log",
+  "Log brightness every frame"). Resets, fallbacks and feature creation are still
+  logged.
+- **Debug hotkeys** (Ctrl+F8/F9/F10) are off by default (a Diagnostics checkbox). The
+  buttons are there too.
+- The "game changed a forced value" check now compares against the value last
+  written, so changing the quality mode isn't reported as the game's doing.
+
 ### Crash report from a probe 0.3.1 session
 
 A `-dx12` session at 14:57-14:58 (probe 0.3.1) crashed about 9 s after a frame dump:

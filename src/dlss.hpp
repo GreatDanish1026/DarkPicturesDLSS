@@ -45,7 +45,8 @@ struct Options {
     // J by default: K (the default for Quality) ignores the current frame for ~70 frames in the
     // "Yah!" shot (FINDINGS.md). An NVIDIA App / driver override takes precedence.
     uint32_t preset = 10;
-    bool logBrightness = true;  // one log line per DLSS frame: input / DLSS / clamped luma
+    bool logBrightness = false;  // one log line per DLSS frame: input / DLSS / clamped luma
+    bool verboseLog = false;     // motion statistics after resets and every 60 frames
 };
 extern Options g_options;
 

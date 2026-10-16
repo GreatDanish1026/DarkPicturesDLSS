@@ -232,7 +232,7 @@ void CollectStats(device* dev, uint32_t slot) {
     dev->unmap_buffer_region(g_statsReadback[slot]);
     g_statsPending[slot] = false;
     // Frame by frame right after a reset: how long does the game's velocity stay wrong?
-    if (g_statsAge[slot] < kResetLogFrames && s[1] && ++g_resetLogLines <= 600)
+    if (g_options.verboseLog && g_statsAge[slot] < kResetLogFrames && s[1] && ++g_resetLogLines <= 600)
         LOG("dlss: reset+%u: object pixels %.0f%%, decoded %.2f px vs camera %.2f px, %.1f%% inflated, "
             "%.1f%% replaced by camera motion, max motion %.1f px",
             g_statsAge[slot], 100.0 * s[1] / (s[0] ? s[0] : 1), s[8] / 16.0 / s[1], s[9] / 16.0 / s[1],
@@ -244,6 +244,12 @@ void CollectStats(device* dev, uint32_t slot) {
     if (s[6]) g_statsDepthMin = std::min(g_statsDepthMin, ~s[6]);
     g_statsDepthMax = std::max(g_statsDepthMax, s[7]);
     if (++g_statsFrames < kStatsLogEvery) return;
+    if (!g_options.verboseLog) {
+        memset(g_statsSum, 0, sizeof(g_statsSum));
+        g_statsMax = g_statsDepthMax = g_statsFrames = 0;
+        g_statsDepthMin = 0xffffffffu;
+        return;
+    }
 
     const double n = g_statsSum[0] ? double(g_statsSum[0]) : 1.0;
     float dmin = 0, dmax = 0;
