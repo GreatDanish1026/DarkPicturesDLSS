@@ -470,6 +470,14 @@ Frame dump 1705 (0.5.10, kick close-up, 85 frames after a reset that reached DLS
   applied to every quality mode at feature creation, and changing it recreates the
   feature. The DRS override wins, so it only takes effect with the NVIDIA App's DLSS
   model override for The Quarry turned off.
+- **0.5.22 run (10:41-10:43), NVIDIA App override off: the "Yah!" smear is Preset K's.**
+  NGX logged "Using App hint Preset E", then "Preset J". The user saw no smear over
+  several attempts with each. In the luma log the clamp cut stayed at 0% (E, frame 2395)
+  and at most 0.1% (J, frames 6711 and 12547) for the whole shot, against ~31% under K.
+  Our inputs are the same in every case. Preset K over-trusts history when a large
+  near-camera object moves fast against a dark background. **0.5.23 requests Preset J
+  by default.** The overlay can still pick E, K, L or M. An NVIDIA App model override
+  for the game replaces our hint, so it should be off.
 
 ### Crash report from a probe 0.3.1 session
 

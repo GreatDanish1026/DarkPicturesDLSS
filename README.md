@@ -3,14 +3,20 @@
 DLSS for **The Quarry** (PC, Steam build 11105655, Unreal Engine 4.26), following the
 approach of [days-gone-dlss](https://github.com/teemupynnonen/days-gone-dlss).
 
-Current build: **0.5.0, first DLSS test** (Direct3D 12 only, launch with `-dx12`).
+Current build: **0.5.23, DLSS test** (Direct3D 12 only, launch with `-dx12`).
 It's still the probe, plus:
 
 - the render scale is forced to 67% with TAA upsampling (the overlay slider changes it);
 - the game's TAAU compute pass is replaced by **DLSS Super Resolution**: a small pass
   turns UE's velocity and depth into DLSS motion vectors, then NGX writes DLSS's output
   into the TAAU's own output texture. If anything fails, the game's TAAU runs as normal;
-- overlay controls: DLSS on/off, jitter sign flips, "motion vectors include jitter".
+- DLSS gets the game's pre-exposure and eye-adaptation exposure, resets on camera cuts,
+  and keeps one feature per output size, so shot changes don't stutter;
+- **model preset J** is requested by default. Preset K (DLSS's default for Quality)
+  ignores the current frame for ~70 frames in some close-up shots. **Turn off any NVIDIA
+  App DLSS model override for The Quarry**, or it replaces this choice;
+- overlay controls for every option, plus diagnostics: a per-frame brightness log, and
+  Ctrl+F8 / Ctrl+Shift+F8 texture captures (`tools/analyze_capture.py` analyses them).
 
 What the probe reports, and how the game was mapped, is in `docs/FINDINGS.md`.
 

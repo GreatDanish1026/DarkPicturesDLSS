@@ -41,7 +41,10 @@ struct Options {
     bool clampLightingHistory = true;  // give SSGI/SSR a clamped copy of the DLSS output
     bool passPreExposure = true;  // tell DLSS the game's per-frame pre-exposure
     bool gameExposure = true;  // give DLSS the game's eye adaptation instead of its auto exposure (recreates)
-    uint32_t preset = 0;  // DLSS model preset hint (0 default, 5 E, 10 J, 11 K, 12 L, 13 M); recreates
+    // DLSS model preset hint (0 default, 5 E, 10 J, 11 K, 12 L, 13 M); recreates the feature.
+    // J by default: K (the default for Quality) ignores the current frame for ~70 frames in the
+    // "Yah!" shot (FINDINGS.md). An NVIDIA App / driver override takes precedence.
+    uint32_t preset = 10;
     bool logBrightness = true;  // one log line per DLSS frame: input / DLSS / clamped luma
 };
 extern Options g_options;
