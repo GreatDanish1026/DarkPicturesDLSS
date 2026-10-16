@@ -453,6 +453,23 @@ Frame dump 1705 (0.5.10, kick close-up, 85 frames after a reset that reached DLS
   RGBA32F. The feature key includes the exposure mode, so toggling recreates the
   feature. Test: in the luma log for "Yah!", the clamp cut should stay near 0% instead
   of climbing to ~30%.
+- **0.5.21 run (10:36): no change.** The feature was created with game exposure, and the
+  "Yah!" smear looked identical (10:36:23 screenshot). In the luma log, the DLSS mean
+  sits at 0.094-0.097 from age 5 to 72 while the input moves 0.059-0.176, and the clamp
+  cut reaches 31%. **At age 73 (frame 1829) DLSS snaps back to the input in one frame**
+  (cut 24.6% -> 0.1%) with no reset from us. So DLSS is effectively ignoring the current
+  frame for ~70 frames, then recovering by itself.
+- The captured inputs (frames 1680/1681) are clean: motion has no NaN/Inf and a max of
+  14 px, nothing is written outside the render rect, there are no saturated velocity
+  codes, and depth is 0..0.26. Camera-only or inverted motion avoids the freeze for the
+  whole frame, including the face, whose motion barely differs. So the large
+  near-camera arm motion seems to make the model reject the current frame globally.
+- **The model is Preset K** (transformer), set by a driver/NVIDIA App (DRS) override:
+  NGX logs "Using DRS Overridden Preset K" for Quality (M for Perf, L for Ultra Perf).
+  **0.5.22** adds a model-preset selector (Default, E (CNN), J, K, L, M). The hint is
+  applied to every quality mode at feature creation, and changing it recreates the
+  feature. The DRS override wins, so it only takes effect with the NVIDIA App's DLSS
+  model override for The Quarry turned off.
 
 ### Crash report from a probe 0.3.1 session
 

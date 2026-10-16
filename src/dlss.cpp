@@ -64,9 +64,11 @@ struct FeatureKey {
     uint32_t renderW = 0, renderH = 0, outW = 0, outH = 0;
     bool jittered = false;
     bool autoExposure = true;  // DLSS's own exposure; false = the game's eye adaptation texture
+    uint32_t preset = 0;       // NVSDK_NGX_DLSS_Hint_Render_Preset_*, 0 = default (a driver override wins)
     bool operator==(const FeatureKey& o) const {
         return renderW == o.renderW && renderH == o.renderH && outW == o.outW && outH == o.outH &&
-               jittered == o.jittered && autoExposure == o.autoExposure;
+               jittered == o.jittered && autoExposure == o.autoExposure &&
+               preset == o.preset;
     }
     bool operator!=(const FeatureKey& o) const { return !(*this == o); }
 };
@@ -600,6 +602,12 @@ void CreateFeature(command_queue* queue, const FeatureKey& key) {
     cp.Feature.InTargetWidth = key.outW;
     cp.Feature.InTargetHeight = key.outH;
     cp.Feature.InPerfQualityValue = QualityFor(float(key.renderW) / float(key.outW));
+    // Model preset hint for every quality mode. An NVIDIA App / driver (DRS) override takes precedence.
+    for (const char* hint : {NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality,
+                             NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance,
+                             NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance,
+                             NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality})
+        NVSDK_NGX_Parameter_SetUI(g_params, hint, key.preset);
     cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
                               NVSDK_NGX_DLSS_Feature_Flags_DepthInverted |
                               (key.autoExposure ? NVSDK_NGX_DLSS_Feature_Flags_AutoExposure : 0) |
@@ -616,9 +624,9 @@ void CreateFeature(command_queue* queue, const FeatureKey& key) {
     }
     g_lastFeature = nullptr;  // push_back may move the others
     g_features.push_back({key, handle, g_done});
-    LOG("dlss: feature created %ux%u -> %ux%u (quality mode %d%s, %s), %zu cached", key.renderW, key.renderH, key.outW,
+    LOG("dlss: feature created %ux%u -> %ux%u (quality mode %d%s, %s, preset hint %u), %zu cached", key.renderW, key.renderH, key.outW,
         key.outH, static_cast<int>(cp.Feature.InPerfQualityValue), key.jittered ? ", jittered MVs" : "",
-        key.autoExposure ? "auto exposure" : "game exposure", g_features.size());
+        key.autoExposure ? "auto exposure" : "game exposure", key.preset, g_features.size());
     SetStatus("ready: %ux%u -> %ux%u", key.renderW, key.renderH, key.outW, key.outH);
 }
 
@@ -649,6 +657,7 @@ Result Evaluate(const Frame& f) {
     key.outH = f.outH;
     key.jittered = g_options.mvJittered;
     key.autoExposure = !(g_options.gameExposure && f.exposure.handle);
+    key.preset = g_options.preset;
     Feature* feature = FindFeature(key);
     if (!feature) {
         g_wanted = key;  // created at the next present; the game's TAAU runs this frame

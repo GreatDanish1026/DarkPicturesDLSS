@@ -1558,6 +1558,15 @@ void DrawOverlay(effect_runtime*) {
     ImGui::Text("(%llu copies)", static_cast<unsigned long long>(dlss::LightingHistoryPatches()));
     ImGui::Checkbox("Pass the game's pre-exposure to DLSS", &dlss::g_options.passPreExposure);
     ImGui::Checkbox("Use the game's exposure, not DLSS auto exposure", &dlss::g_options.gameExposure);
+    {
+        static const char* names[] = {"Default", "E (CNN)", "J", "K", "L", "M"};
+        static const uint32_t values[] = {0, 5, 10, 11, 12, 13};
+        int current = 0;
+        for (int i = 0; i < 6; ++i)
+            if (values[i] == dlss::g_options.preset) current = i;
+        if (ImGui::Combo("DLSS model preset (an NVIDIA App override wins)", &current, names, 6))
+            dlss::g_options.preset = values[current];
+    }
     ImGui::Checkbox("Log brightness every frame (input / DLSS / clamped luma)", &dlss::g_options.logBrightness);
 
     // Record option changes, so a test run can be read back from the log.
@@ -1566,11 +1575,11 @@ void DrawOverlay(effect_runtime*) {
     if (o.enabled != logged.enabled || o.flipJitterX != logged.flipJitterX || o.flipJitterY != logged.flipJitterY ||
         o.mvJittered != logged.mvJittered || o.invertMotion != logged.invertMotion ||
         o.ignoreVelocity != logged.ignoreVelocity || o.clampLightingHistory != logged.clampLightingHistory ||
-        o.passPreExposure != logged.passPreExposure || o.gameExposure != logged.gameExposure ||
+        o.passPreExposure != logged.passPreExposure || o.gameExposure != logged.gameExposure || o.preset != logged.preset ||
         o.logBrightness != logged.logBrightness) {
-        Log("options at frame %llu: DLSS %s, flip jitter X %d Y %d, MVs jittered %d, invert MVs %d, ignore velocity %d, clamp lighting history %d, pre-exposure %d, game exposure %d, log brightness %d",
+        Log("options at frame %llu: DLSS %s, flip jitter X %d Y %d, MVs jittered %d, invert MVs %d, ignore velocity %d, clamp lighting history %d, pre-exposure %d, game exposure %d, preset %u, log brightness %d",
             static_cast<unsigned long long>(g_frame), o.enabled ? "on" : "off", o.flipJitterX, o.flipJitterY,
-            o.mvJittered, o.invertMotion, o.ignoreVelocity, o.clampLightingHistory, o.passPreExposure, o.gameExposure, o.logBrightness);
+            o.mvJittered, o.invertMotion, o.ignoreVelocity, o.clampLightingHistory, o.passPreExposure, o.gameExposure, o.preset, o.logBrightness);
         logged = o;
     }
     if (g_api == device_api::d3d12)
