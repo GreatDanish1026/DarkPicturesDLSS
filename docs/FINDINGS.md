@@ -593,3 +593,8 @@ issues).
 - A `-dx12` run, to see if the D3D12 RHI starts.
 - Repeat with the remaining `~mods` paks removed. `NativeSSGI_P.pak`,
   `BetterReflections_P.pak` and `zzz_NoCameraEffects_P.pak` all change post-processing.
+
+### 1.0.0: first release (2026-10-16)
+
+Same code as 0.6.1, with the version bumped. It ships as `QuarryDLSS.addon64` with the
+README, LICENSE and THIRD_PARTY_NOTICES.txt. `nvngx_dlss.dll` isn't included.

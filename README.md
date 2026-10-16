@@ -4,7 +4,7 @@ NVIDIA **DLSS Super Resolution** for **The Quarry** (PC, Steam build 11105655, U
 Engine 4.26), as a ReShade add-on. It replaces the game's own temporal upscaler with DLSS,
 following the approach of [days-gone-dlss](https://github.com/teemupynnonen/days-gone-dlss).
 
-Version **0.6.1**.
+Version **1.0.0**.
 
 ## Requirements
 
