@@ -1120,7 +1120,8 @@ bool DetectCameraCut(bool flag, const float* origin, const float* forward) {
 
 // Bindings and constants of one TAAU dispatch (FINDINGS.md, "TAAU path at 67%"):
 // t1 colour, t2 depth, t3 velocity, u0 output; cb0 row 27 render rect, row 24 output
-// rect, row 28.xy jitter, row 0.z camera cut; cb1 (View) rows 122-125 ClipToPrevClip.
+// rect, row 28.xy jitter, row 0.z camera cut; cb1 (View) rows 122-125 ClipToPrevClip,
+// row 135.y PreExposure.
 bool BuildDlssFrame(command_list* cmd, const ContextState& st, dlss::Frame& f, std::string& why) {
     device* dev = cmd->get_device();
     const HeapEntry* color = ResolveTableSlot(dev, st, true, Slot::srv, 1);
@@ -1134,7 +1135,7 @@ bool BuildDlssFrame(command_list* cmd, const ContextState& st, dlss::Frame& f, s
         }
     std::vector<uint8_t> cb0, cb1;
     if (!ReadConstants(dev, st.csCb[0], 29 * 16, cb0) || cb0.size() < 29 * 16 ||
-        !ReadConstants(dev, st.csCb[1], 126 * 16, cb1) || cb1.size() < 126 * 16) {
+        !ReadConstants(dev, st.csCb[1], 136 * 16, cb1) || cb1.size() < 136 * 16) {
         why = "the TAAU constants could not be read";
         return false;
     }
@@ -1157,6 +1158,8 @@ bool BuildDlssFrame(command_list* cmd, const ContextState& st, dlss::Frame& f, s
     f.jitterY = row(cb0, 28)[1];
     f.reset = DetectCameraCut(cameraCut != 0, row(cb1, 67), row(cb1, 18));
     memcpy(f.clipToPrevClip, row(cb1, 122), sizeof(f.clipToPrevClip));
+    f.preExposure = row(cb1, 135)[1];
+    if (!(f.preExposure > 0.0f) || f.preExposure > 1e30f) f.preExposure = 1.0f;
 
     // During loading the game binds 1x1 placeholders (e.g. for velocity): every input
     // must cover the render rect.
@@ -1534,6 +1537,7 @@ void DrawOverlay(effect_runtime*) {
     ImGui::Checkbox("Clamp lighting history for SSGI/SSR (test)", &dlss::g_options.clampLightingHistory);
     ImGui::SameLine();
     ImGui::Text("(%llu copies)", static_cast<unsigned long long>(dlss::LightingHistoryPatches()));
+    ImGui::Checkbox("Pass the game's pre-exposure to DLSS", &dlss::g_options.passPreExposure);
     ImGui::Checkbox("Log brightness every frame (input / DLSS / clamped luma)", &dlss::g_options.logBrightness);
 
     // Record option changes, so a test run can be read back from the log.
@@ -1542,10 +1546,10 @@ void DrawOverlay(effect_runtime*) {
     if (o.enabled != logged.enabled || o.flipJitterX != logged.flipJitterX || o.flipJitterY != logged.flipJitterY ||
         o.mvJittered != logged.mvJittered || o.invertMotion != logged.invertMotion ||
         o.ignoreVelocity != logged.ignoreVelocity || o.clampLightingHistory != logged.clampLightingHistory ||
-        o.logBrightness != logged.logBrightness) {
-        Log("options at frame %llu: DLSS %s, flip jitter X %d Y %d, MVs jittered %d, invert MVs %d, ignore velocity %d, clamp lighting history %d, log brightness %d",
+        o.passPreExposure != logged.passPreExposure || o.logBrightness != logged.logBrightness) {
+        Log("options at frame %llu: DLSS %s, flip jitter X %d Y %d, MVs jittered %d, invert MVs %d, ignore velocity %d, clamp lighting history %d, pre-exposure %d, log brightness %d",
             static_cast<unsigned long long>(g_frame), o.enabled ? "on" : "off", o.flipJitterX, o.flipJitterY,
-            o.mvJittered, o.invertMotion, o.ignoreVelocity, o.clampLightingHistory, o.logBrightness);
+            o.mvJittered, o.invertMotion, o.ignoreVelocity, o.clampLightingHistory, o.passPreExposure, o.logBrightness);
         logged = o;
     }
     if (g_api == device_api::d3d12)

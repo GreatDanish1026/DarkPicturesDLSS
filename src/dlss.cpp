@@ -274,6 +274,7 @@ bool g_lumaPending[kStatsRing] = {};
 uint64_t g_lumaFrame[kStatsRing] = {};  // probe frame, per slot
 uint32_t g_lumaAge[kStatsRing] = {};    // frames since the last reset, per slot
 bool g_lumaClamp[kStatsRing] = {};      // clamped copy handed to the lighting that frame
+float g_lumaPreExposure[kStatsRing] = {};  // View.PreExposure that frame
 uint64_t g_patchedRing[8] = {};         // frames whose lighting history was patched (frame % 8)
 
 bool CreateLuma(device* dev) {
@@ -316,9 +317,9 @@ void CollectLuma(device* dev, uint32_t slot) {
     const uint64_t f = g_lumaFrame[slot];
     // "lit" says whether the lighting read the clamped copy in the next frame.
     const char* lit = !g_lumaClamp[slot] ? "off" : g_patchedRing[(f + 1) % 8] == f + 1 ? "yes" : "no";
-    LOG("luma f%llu age %u: in %.3f max %.1f | dlss %.3f max %.1f | clamped %.3f max %.1f | cut %.1f%% "
+    LOG("luma f%llu age %u pre %.4g: in %.3f max %.1f | dlss %.3f max %.1f | clamped %.3f max %.1f | cut %.1f%% "
         "hot %.2f%%/%.2f%% (dlss/in) nonfinite %u/%u (dlss/in) lit %s",
-        static_cast<unsigned long long>(f), g_lumaAge[slot], s[1] / n, maxima[0], s[2] / n, maxima[1], s[3] / n,
+        static_cast<unsigned long long>(f), g_lumaAge[slot], g_lumaPreExposure[slot], s[1] / n, maxima[0], s[2] / n, maxima[1], s[3] / n,
         maxima[2], 100.0 * s[7] / s[0], 100.0 * s[10] / s[0], 100.0 * s[11] / s[0], s[9], s[8], lit);
 }
 
@@ -618,6 +619,9 @@ Result Evaluate(const Frame& f) {
     e.InMVScaleX = g_options.invertMotion ? -1.0f : 1.0f;
     e.InMVScaleY = g_options.invertMotion ? -1.0f : 1.0f;
     e.InOutputSubrectBase = {f.outX, f.outY};
+    // UE scales scene colour by View.PreExposure, which follows the eye adaptation and can
+    // jump ~1000x at a cut. Without it DLSS blends history from another exposure scale.
+    e.InPreExposure = g_options.passPreExposure ? f.preExposure : 1.0f;
     const NVSDK_NGX_Result r = NGX_D3D12_EVALUATE_DLSS_EXT(list, feature->handle, g_params, &e);
     cmd->barrier(2, ours, srv, uav);
     if (NVSDK_NGX_FAILED(r)) {
@@ -662,6 +666,7 @@ Result Evaluate(const Frame& f) {
             g_lumaFrame[slot] = f.frame;
             g_lumaAge[slot] = age;
             g_lumaClamp[slot] = g_options.clampLightingHistory;
+            g_lumaPreExposure[slot] = f.preExposure;
             if (g_options.clampLightingHistory) {
                 g_histOutput = f.output;
                 g_histFrame = f.frame;

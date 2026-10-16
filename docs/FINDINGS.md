@@ -327,6 +327,28 @@ Frame dump 1705 (0.5.10, kick close-up, 85 frames after a reset that reached DLS
   first while `in` stays flat, DLSS's own history is blowing up. If `in` climbs first,
   the energy comes through the game's lighting. Non-finite counts flag NaN/Inf.
   Overlay: "Log brightness every frame" (on by default).
+- **0.5.13 run (10:03-10:04):** the brightness log points to pre-exposure, not the
+  lighting loop:
+  - **Kick shot (cut at frame 2072):** the game's input colour jumped from mean luma
+    0.017 to 31.4 (max ~61000, near the fp16 limit) in one frame, at age 3 (frame 2076).
+    It then decayed over ~30 frames to ~0.5 and settled near 0.12. DLSS tracked the input
+    exactly (the clamp cut ~0%, no NaN/Inf). A one-frame jump of ~1800x can't be SSGI
+    feedback. It's the input's scale changing.
+  - **"Yah!" shot (frames 1981-2071, the 10:04:08 screenshot):** stretched staircase
+    smears. The input mean wandered 0.094 -> 0.058 -> 0.177 -> 0.069, while DLSS's mean
+    stayed flat at ~0.087. The clamp cut rose from 0% to 30% of samples. DLSS was holding
+    history from another brightness scale. Motion vectors were sane (decoded ~4 px vs
+    camera ~2.7 px).
+  - **Cause:** View row 135 is (NumSceneColorMSAASamples, **PreExposure**,
+    OneOverPreExposure). It was 11.42 / 0.0876 in the 15 Oct TAAU dump. UE 4.26 stores
+    scene colour multiplied by PreExposure, which follows the eye adaptation. UE's TAA
+    rescales its history when it changes; DLSS can only do that if it's told through
+    `InPreExposure`, which we left at 1. This explains the brightness that persists in
+    static areas. It also explains why runs vary, since it depends on the adaptation at
+    the cut, and why SSGI/SSR (which change the scene's exposure) made it likelier.
+- **0.5.14:** passes View.PreExposure (cb1 row 135.y) as `InPreExposure` every frame,
+  with an overlay toggle "Pass the game's pre-exposure to DLSS" (on). The luma log lines
+  now show `pre <value>`.
 
 ### Crash report from a probe 0.3.1 session
 

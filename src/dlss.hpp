@@ -19,6 +19,7 @@ struct Frame {
     uint32_t outX = 0, outY = 0, outW = 0, outH = 0;  // output view rect
     float jitterX = 0, jitterY = 0;            // render pixels, from the TAA constants
     float clipToPrevClip[16] = {};             // View.ClipToPrevClip, row-major
+    float preExposure = 1.0f;                  // View.PreExposure: the colour input is scaled by it
     bool reset = false;                        // camera cut (sticky across fallback frames)
     uint64_t frame = 0;                        // probe frame number, to spot frames DLSS missed
 };
@@ -37,6 +38,7 @@ struct Options {
     bool invertMotion = false;  // DLSS MV scale -1: tests the motion vector sign
     bool ignoreVelocity = false;  // camera reprojection only: tests the game velocity decode
     bool clampLightingHistory = true;  // give SSGI/SSR a clamped copy of the DLSS output
+    bool passPreExposure = true;  // tell DLSS the game's per-frame pre-exposure
     bool logBrightness = true;  // one log line per DLSS frame: input / DLSS / clamped luma
 };
 extern Options g_options;
