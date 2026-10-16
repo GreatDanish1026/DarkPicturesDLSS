@@ -37,7 +37,7 @@ $products = @{
                       Exes = @("TheQuarry-Win64-Shipping.exe")
                       GameBin = "E:\SteamLibrary\steamapps\common\The Quarry\SMG026\Binaries\Win64" }
     DarkPictures = @{ Name = "DarkPicturesDLSS"; Define = "QDLSS_DARK_PICTURES"; Readme = "docs\README-DarkPictures.md"
-                      Exes = @("HouseOfAshes-Win64-Shipping.exe")
+                      Exes = @("HouseOfAshes-Win64-Shipping.exe", "TheDevilInMe-Win64-Shipping.exe")
                       GameBin = "E:\SteamLibrary\steamapps\common\The Dark Pictures Anthology - House of Ashes\SMG025\Binaries\Win64" }
 }
 $p = $products[$Product]

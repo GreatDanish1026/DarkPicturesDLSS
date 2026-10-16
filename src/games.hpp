@@ -13,6 +13,7 @@ struct GameInfo {
 #if defined(QDLSS_DARK_PICTURES)
 constexpr GameInfo kGames[] = {
     {L"HouseOfAshes-Win64-Shipping.exe", "House of Ashes"},  // UE 4.26, SMG025
+    {L"TheDevilInMe-Win64-Shipping.exe", "The Devil in Me"},  // UE 4.26, SMG028
 };
 #else
 constexpr GameInfo kGames[] = {
