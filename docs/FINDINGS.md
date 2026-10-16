@@ -812,6 +812,32 @@ Streamline is only initialised once a swap chain is being created (factory) or e
     hasn't changed.
   - Not yet confirmed in game.
 
+### Run 7 (1.0.0-fg.7, 2026-10-16 14:36): the F11 hang isn't DLSS-G generating frames
+
+- User report: same device-hung crash on F11 twice.
+- What the log shows:
+  - During loading (DLSS SR idle, nothing tagged), a full F11 cycle (SetFullscreenState,
+    resizes to 1920x1080 and back to 3840x2160) went through.
+  - In gameplay (DLSS SR running, Ultra Quality, frames tagged), F11 resized to 1280x720
+    at 39.27. DLSS-G was switched off and its resources freed at 39.46. It **never came
+    back on**, since the 10-present wait hadn't run out.
+  - F11 back to 3840x2160 at 40.37. 11 frames were recorded in 1.2 s, including one at
+    100% while the game reset the scale. **No present completed after that resize**: the
+    first one returned the device-removed error at 45.69.
+- So the GPU hangs on the first 4K frames after a resize back up, with DLSS-G off. Run 6
+  had the same shape: shrinking survives, growing back while DLSS SR is running doesn't.
+  Two suspects:
+  - DLSS SR's own resize path, which has never been tested with F11 since DLSS went in.
+    It recreates the motion, depth and lighting-history textures on a size change.
+  - Streamline's per-frame copy of the volatile tags (`eOnlyValidNow`), recorded into the
+    game's command list even while DLSS-G is paused. If its clone buffers stay at the
+    988x556 size, copying 2960x1664 into them overruns, which fits "shrink fine, grow
+    hangs". The earlier "unsupported alignment ... overridden to 0" warning is from that
+    clone path.
+- Next tests: (a) F11 twice with frame generation Off from launch (no Streamline), DLSS
+  on; (b) frame generation on with Diagnostics > "Streamline copies motion vectors and
+  depth when tagged" unchecked (`eValidUntilPresent`, so no clone copies).
+
 ### Results
 
 | Question | Factory hook | Swap chain upgrade |
