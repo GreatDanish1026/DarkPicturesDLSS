@@ -380,6 +380,16 @@ Frame dump 1705 (0.5.10, kick close-up, 85 frames after a reset that reached DLS
 - **0.5.15:** logs `pre-exposure <value> at frame N (DLSS on|off)` whenever the game's
   PreExposure changes by more than 25%, with DLSS on or off. A DLSS-off run of the kick
   shot answers whether the jump to ~2458 is the game's own.
+- **0.5.15 run (10:15), DLSS off from frame 3097: the white flash is the game's own.**
+  The user saw it flash white with the game's TAAU. The log shows the same sequence as
+  under DLSS: a cut at frame 4772, then `pre-exposure 2458` at 4776 (DLSS off), decaying
+  1857, 1348, 995 ... 12.6 at 4819, then ~2.6 by 5062. The values at cuts are identical
+  in every run (2458, 1.2, 0.3446), which looks like authored or clamped cutscene
+  exposure, not something we cause. **The kick-shot blow-out is closed as far as DLSS is
+  concerned.** DLSS now reproduces the game's flash (with `InPreExposure`) instead of
+  holding the bright history for seconds.
+- **Remaining DLSS bug: the "Yah!" smear**, from the game's velocity on part of that
+  shot (camera-only motion fixes it).
 
 ### Crash report from a probe 0.3.1 session
 
