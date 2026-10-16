@@ -336,6 +336,7 @@ struct CaptureItem {
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
 };
 bool g_captureWanted = false;
+bool g_captureSecond = false;  // the first of the pair is copied; take the next frame
 bool g_captureArmed = false;     // capture kCaptureArmedAge frames after the next reset
 bool g_captureSawReset = false;
 constexpr uint32_t kCaptureArmedAge = 45;
@@ -391,6 +392,8 @@ void CaptureTexture(command_list* cmd, resource res, resource_usage state, const
 }
 
 void ReleaseCapture() {
+    g_captureSecond = false;
+    g_captureWait = 0;
     for (auto& item : g_capture)
         if (item.buffer) item.buffer->Release();
     g_capture.clear();
@@ -398,7 +401,7 @@ void ReleaseCapture() {
 
 // At present: once the copies are surely done, writes them out.
 void FinishCapture() {
-    if (g_capture.empty() || --g_captureWait > 0) return;
+    if (g_capture.empty() || g_captureWait == 0 || --g_captureWait > 0) return;
     const std::string base = GameDir() + "QuarryDLSS_capture_" + std::to_string(g_captureFrame);
     std::string header = g_captureHeader;
     for (auto& item : g_capture) {
@@ -719,25 +722,33 @@ Result Evaluate(const Frame& f) {
             g_captureWanted = true;
         }
     }
-    if (g_captureWanted && g_capture.empty()) {
+    // Two consecutive frames: the second one's motion should map its colour onto the first's.
+    const bool second = g_captureSecond;
+    if ((g_captureWanted && g_capture.empty()) || second) {
         g_captureWanted = false;
-        CaptureTexture(cmd, f.color, resource_usage::shader_resource_non_pixel, "color");
-        CaptureTexture(cmd, f.velocity, resource_usage::shader_resource_non_pixel, "velocity");
-        CaptureTexture(cmd, g_motion, resource_usage::unordered_access, "motion");
-        CaptureTexture(cmd, g_depth, resource_usage::unordered_access, "depth");
+        g_captureSecond = !second;
+        const char* sfx = second ? "1" : "0";
+        CaptureTexture(cmd, f.color, resource_usage::shader_resource_non_pixel, (std::string("color") + sfx).c_str());
+        CaptureTexture(cmd, f.velocity, resource_usage::shader_resource_non_pixel, (std::string("velocity") + sfx).c_str());
+        CaptureTexture(cmd, g_motion, resource_usage::unordered_access, (std::string("motion") + sfx).c_str());
+        CaptureTexture(cmd, g_depth, resource_usage::unordered_access, (std::string("depth") + sfx).c_str());
         char h[1024];
         int n = snprintf(h, sizeof(h),
-                         "frame %llu age %u\nrender %ux%u output %u,%u %ux%u\njitter %.6f %.6f\npreexposure %.6g\n"
-                         "camera_only %d stale_threshold %.3f ignore_velocity %d invert_motion %d\nclip_to_prev_clip",
-                         static_cast<unsigned long long>(f.frame), age, f.renderW, f.renderH, f.outX, f.outY, f.outW,
-                         f.outH, f.jitterX, f.jitterY, f.preExposure, cameraOnly ? 1 : 0, staleThreshold,
-                         g_options.ignoreVelocity ? 1 : 0, g_options.invertMotion ? 1 : 0);
+                         "frame%s %llu age %u\nrender%s %ux%u output %u,%u %ux%u\njitter%s %.6f %.6f\npreexposure%s %.6g\n"
+                         "camera_only %d stale_threshold %.3f ignore_velocity %d invert_motion %d\nclip_to_prev_clip%s",
+                         sfx, static_cast<unsigned long long>(f.frame), age, sfx, f.renderW, f.renderH, f.outX, f.outY,
+                         f.outW, f.outH, sfx, f.jitterX, f.jitterY, sfx, f.preExposure, cameraOnly ? 1 : 0,
+                         staleThreshold, g_options.ignoreVelocity ? 1 : 0, g_options.invertMotion ? 1 : 0, sfx);
         for (int i = 0; i < 16 && n > 0 && n < int(sizeof(h)); ++i)
             n += snprintf(h + n, sizeof(h) - n, " %.9g", f.clipToPrevClip[i]);
-        g_captureHeader = std::string(h) + "\n";
-        g_captureFrame = f.frame;
-        g_captureWait = 6;
-        g_captureStatus = "copied frame " + std::to_string(f.frame) + ", writing...";
+        if (!second) {
+            g_captureHeader.clear();
+            g_captureFrame = f.frame;
+        } else {
+            g_captureWait = 6;
+            g_captureStatus = "copied frames " + std::to_string(g_captureFrame) + "-" + std::to_string(f.frame) + ", writing...";
+        }
+        g_captureHeader += std::string(h) + "\n";
         LOG("capture: copied DLSS inputs of frame %llu (age %u)", static_cast<unsigned long long>(f.frame), age);
     }
 

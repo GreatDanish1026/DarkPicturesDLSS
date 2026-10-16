@@ -403,6 +403,18 @@ Frame dump 1705 (0.5.10, kick close-up, 85 frames after a reset that reached DLS
   range overran the buffer. 0.5.17 maps the whole buffer and logs any failure. Both
   captures also landed in the kick shot: "Yah!" lasts only ~90 frames. 0.5.17 adds
   **Ctrl+Shift+F8**, which arms a capture 45 frames after the next camera cut.
+- `tools/analyze_capture.py` recomputes the decoded game velocity and the camera
+  reprojection per pixel and writes PNGs. **Kick shot (frame 1926):** static walls with
+  game velocity match camera motion to within 0.02 px, so the velocity decode and the
+  ClipToPrevClip reprojection are right. Only the moving characters differ.
+  **"Yah!" (frame 1635, age 45):** 71% of pixels carry game velocity. The wall again
+  matches the camera (0.02 px). The arm and shoulder report 2-6 px (+x, i.e. "was further
+  right") against 0.8 px of camera motion. That's plausible for a moving arm, so one
+  frame can't say whether it's wrong.
+- **0.5.18:** a capture now takes two consecutive DLSS frames (suffixes 0 and 1). The
+  analyser checks each candidate motion field (game, camera-only, inverted game, zero,
+  what DLSS got) by reprojecting frame 1 into frame 0 and measuring the colour error.
+  The best match is the motion that's actually right.
 
 ### Crash report from a probe 0.3.1 session
 
