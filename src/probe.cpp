@@ -1370,13 +1370,15 @@ bool g_debugHotkeys = false;      // Ctrl+F8 / F9 / F10 captures and dumps
 // Quality modes: render scale per axis, as DLSS defines them. "Custom" = the Advanced slider.
 struct QualityMode {
     const char* name;
+    const char* key;  // in ReShade.ini, stable across versions
     float percentage;
 };
 const QualityMode kQualityModes[] = {
-    {"Quality (67%)", 66.7f}, {"Balanced (58%)", 58.0f}, {"Performance (50%)", 50.0f},
-    {"Ultra Performance (33%)", 33.3f}, {"Custom", 0.0f}};
-constexpr int kCustomQuality = 4;
-int g_quality = 0;
+    {"Ultra Quality (77%)", "UltraQuality", 77.0f}, {"Quality (67%)", "Quality", 66.7f},
+    {"Balanced (58%)", "Balanced", 58.0f},          {"Performance (50%)", "Performance", 50.0f},
+    {"Ultra Performance (33%)", "UltraPerformance", 33.3f}, {"Custom", "Custom", 0.0f}};
+constexpr int kCustomQuality = 5;
+int g_quality = 1;  // Quality
 uint32_t g_foreignWrites = 0;  // times the game changed a forced value
 
 void FindCvars() {
@@ -1515,10 +1517,15 @@ constexpr char kConfigSection[] = "QuarryDLSS";
 void LoadSettings() {
     auto& o = dlss::g_options;
     reshade::get_config_value(nullptr, kConfigSection, "Enabled", o.enabled);
-    int quality = g_quality;
-    if (reshade::get_config_value(nullptr, kConfigSection, "QualityMode", quality) && quality >= 0 &&
-        quality <= kCustomQuality)
-        g_quality = quality;
+    char key[32] = {};
+    size_t keySize = sizeof(key);
+    int legacy = 0;
+    if (reshade::get_config_value(nullptr, kConfigSection, "Quality", key, &keySize)) {
+        for (int i = 0; i <= kCustomQuality; ++i)
+            if (strcmp(key, kQualityModes[i].key) == 0) g_quality = i;
+    } else if (reshade::get_config_value(nullptr, kConfigSection, "QualityMode", legacy) && legacy >= 0 && legacy <= 4) {
+        g_quality = legacy + 1;  // 0.6.0 saved an index into a list without Ultra Quality
+    }
     float custom = g_forcePercentage;
     if (reshade::get_config_value(nullptr, kConfigSection, "CustomScale", custom) && custom >= 33.0f && custom <= 100.0f)
         g_forcePercentage = custom;
@@ -1533,7 +1540,7 @@ void LoadSettings() {
 void SaveSettings() {
     const auto& o = dlss::g_options;
     reshade::set_config_value(nullptr, kConfigSection, "Enabled", o.enabled);
-    reshade::set_config_value(nullptr, kConfigSection, "QualityMode", g_quality);
+    reshade::set_config_value(nullptr, kConfigSection, "Quality", kQualityModes[g_quality].key);
     reshade::set_config_value(nullptr, kConfigSection, "CustomScale", g_forcePercentage);
     reshade::set_config_value(nullptr, kConfigSection, "Preset", static_cast<unsigned int>(o.preset));
     reshade::set_config_value(nullptr, kConfigSection, "StabiliseLighting", o.clampLightingHistory);

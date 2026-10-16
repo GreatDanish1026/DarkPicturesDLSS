@@ -511,6 +511,10 @@ DLSS behaves as in 0.5.23. User-facing changes:
   buttons are there too.
 - The "game changed a forced value" check now compares against the value last
   written, so changing the quality mode isn't reported as the game's doing.
+- **0.6.1:** adds **Ultra Quality (77%)**, created as NGX `UltraQuality` (render/output
+  fraction above 0.72). The quality mode is now saved by name (`Quality=UltraQuality`,
+  `Quality`, `Balanced`, ...). A 0.6.0 `QualityMode` index is migrated, since
+  inserting a mode at the top shifted the indices.
 
 ### Crash report from a probe 0.3.1 session
 

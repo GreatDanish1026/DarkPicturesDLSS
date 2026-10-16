@@ -4,7 +4,7 @@ NVIDIA **DLSS Super Resolution** for **The Quarry** (PC, Steam build 11105655, U
 Engine 4.26), as a ReShade add-on. It replaces the game's own temporal upscaler with DLSS,
 following the approach of [days-gone-dlss](https://github.com/teemupynnonen/days-gone-dlss).
 
-Version **0.6.0**.
+Version **0.6.1**.
 
 ## Requirements
 
@@ -33,8 +33,8 @@ Press **Home** in game to open ReShade, then open the **Add-ons** tab and the
 - **DLSS Super Resolution**: on or off. Off gives you the game's own anti-aliasing at
   native resolution.
 - The status line shows whether DLSS is active and at what resolutions.
-- **Quality mode**: Quality (67%), Balanced (58%), Performance (50%) or Ultra
-  Performance (33%) of the output resolution per axis.
+- **Quality mode**: Ultra Quality (77%), Quality (67%), Balanced (58%), Performance
+  (50%) or Ultra Performance (33%) of the output resolution per axis.
 - **Advanced**: the DLSS model (J is recommended), a custom render scale, and
   "Stabilise screen-space lighting", which helps with the SSGI/SSR pak mods.
 - **Diagnostics**: for troubleshooting and bug reports only.
@@ -44,8 +44,8 @@ Settings are saved in `ReShade.ini` under `[QuarryDLSS]`.
 ## Known limits
 
 - DirectX 12 only.
-- Quality mode is the one that's been tested most. Balanced, Performance and Ultra
-  Performance should work, but haven't had a full playthrough.
+- Quality mode is the one that's been tested most. The other modes should work, but
+  haven't had a full playthrough.
 - DLSS model **K**, which NVIDIA uses by default for Quality, smears some close-up
   cutscene shots, so the add-on asks for **J**. An NVIDIA App or driver model override
   for the game replaces that choice.
