@@ -785,6 +785,33 @@ Streamline is only initialised once a swap chain is being created (factory) or e
   while DLSS SR is off or the Streamline files are missing. The technical status, the
   pacing line and the tag-copy switch moved to Diagnostics.
 
+### Run 6 (1.0.0-fg.6, 2026-10-16 14:32): F11 twice hung the GPU
+
+- User report: F11 twice with frame generation on; going back to fullscreen, the game
+  died with UE's "Map failed ... DXGI_ERROR_DEVICE_REMOVED, reason DXGI_ERROR_DEVICE_HUNG".
+- Log: the first F11 (ResizeBuffers to 1280x720 at 56.87) went through. fg.6 switched
+  DLSS-G off and back on 3 presents later, and DLSS-G set itself up for 1280x720 at 57.53
+  ("Override Reported ... FrameGeneration"). The second F11 (ResizeBuffers back to
+  3840x2160 at 57.63) was followed by only 11 frames in 6 s, then the device was removed
+  at 14:33:03.7. ReShade logged the removal too.
+- Likely causes, both in fg.6's resize handling:
+  - DLSS-G was switched Off with `eRetainResourcesWhenOff` and back on 3 presents after
+    the 4K resize, still holding the resources it made for 1280x720. NVIDIA's guide asks
+    for `slFreeResources` after anything but a brief pause.
+  - The back buffer subrect in the tags came from the probe, which only refreshes at the
+    next ReShade present, so the first frames after the resize were tagged with the old
+    1280x720.
+- **1.0.0-fg.7:**
+  - After a resize or fullscreen change, DLSS-G goes Off. Its resources are freed
+    (`slFreeResources(kFeatureDLSS_G)`) on the present thread once a present has gone
+    through with it Off, and it stays Off for 10 presents and until that free has
+    happened. It then reallocates for the new size.
+  - The back buffer size for the subrect tag now comes from the SL swap chain itself
+    (`GetDesc`), read at creation and right after each resize.
+  - Brief pauses (cut frames, DLSS SR fallbacks) still keep the resources, since the size
+    hasn't changed.
+  - Not yet confirmed in game.
+
 ### Results
 
 | Question | Factory hook | Swap chain upgrade |

@@ -56,7 +56,7 @@ constexpr char kProjectId[] = "6c2f3b1e-9d4a-4e57-8b6f-2a1d7c9e0f53";
 const wchar_t* const kFiles[] = {L"sl.interposer.dll", L"sl.common.dll", L"sl.dlss_g.dll",
                                  L"sl.reflex.dll",     L"sl.pcl.dll",    L"nvngx_dlssg.dll"};
 constexpr uint32_t kPauseLogFrames = 30;  // untagged frames in a row before a pause is logged / shown
-constexpr uint32_t kResizeFrames = 3;     // presents DLSS-G stays off after a resize
+constexpr uint32_t kResizeFrames = 10;    // presents DLSS-G stays off after a resize
 
 const sl::ViewportHandle& Viewport() {
     static const sl::ViewportHandle v(0u);
@@ -156,6 +156,7 @@ struct Sl {
     PFun_slIsFeatureLoaded* isLoaded = nullptr;
     PFun_slGetFeatureRequirements* requirements = nullptr;
     PFun_slGetFeatureVersion* version = nullptr;
+    PFun_slFreeResources* freeResources = nullptr;
     PFun_slDLSSGSetOptions* dlssgSetOptions = nullptr;
     PFun_slDLSSGGetState* dlssgGetState = nullptr;
     PFun_slReflexSetOptions* reflexSetOptions = nullptr;
@@ -176,6 +177,11 @@ sl::FrameToken* g_token = nullptr;    // the frame being built (tagged at the TA
 uint32_t g_taggedFrame = UINT32_MAX;  // frame index TagFrame last tagged
 bool g_optionsDirty = true;
 uint32_t g_resizeFrames = 0;          // presents left with DLSS-G off after a resize
+uint32_t g_backBufferW = 0, g_backBufferH = 0;  // the SL swap chain's, read at creation and after each resize
+// Set by a resize: DLSS-G's resources (sized for the old swap chain) are freed after the next
+// present with it off, so it reallocates when it comes back on. Run 6: turning it back on with
+// the kept 1280x720 resources after an F11 back to 3840x2160 hung the GPU.
+std::atomic<bool> g_freePending{false};
 
 // Present thread only.
 Mode g_applied = Mode::count;         // what DLSS-G was last set to (count: nothing yet)
@@ -282,6 +288,7 @@ bool EnsureSl() {
     SL_GET(isLoaded, slIsFeatureLoaded)
     SL_GET(requirements, slGetFeatureRequirements)
     SL_GET(version, slGetFeatureVersion)
+    SL_GET(freeResources, slFreeResources)
 #undef SL_GET
 
     static const sl::Feature features[] = {sl::kFeatureDLSS_G, sl::kFeatureReflex, sl::kFeaturePCL};
@@ -511,7 +518,7 @@ HRESULT PresentWithMarkers(F&& present) {
         LOG("fg: paused: DLSS Super Resolution isn't running");
     if (dirty) LOG("fg: frame generation %s selected", ModeName(g_options.mode));
     Mode want = g_options.mode;
-    if (resizing || !tagged) want = Mode::off;
+    if (resizing || !tagged || g_freePending) want = Mode::off;
     if (want == Mode::off && g_options.mode != Mode::off) {
         std::lock_guard lock(g_mutex);
         ++g_pausedFrames;
@@ -523,6 +530,11 @@ HRESULT PresentWithMarkers(F&& present) {
     ++g_realPresents;  // before: in case ReShade sees this frame's presents inside the call
     const HRESULT hr = present();
     Marker(sl::PCLMarker::ePresentEnd, *token);
+    if (g_freePending && g_applied == Mode::off) {
+        g_freePending = false;
+        if (Check(g_sl.freeResources(sl::kFeatureDLSS_G, Viewport()), "slFreeResources(DLSS-G)"))
+            LOG("fg: DLSS-G resources freed after the resize");
+    }
     PollState();
     sl::FrameToken* next = nullptr;
     if (Check(g_sl.newFrameToken(next, nullptr), "slGetNewFrameToken") && next) {
@@ -588,32 +600,48 @@ HRESULT STDMETHODCALLTYPE SlProxyPresent1(IDXGISwapChain1* self, UINT sync, UINT
     return PresentWithMarkers([&] { return g_slPresent1(self, sync, flags, p); });
 }
 
+void UpdateBackBufferSize(IDXGISwapChain* sc) {
+    DXGI_SWAP_CHAIN_DESC d = {};
+    if (FAILED(sc->GetDesc(&d))) return;
+    std::lock_guard lock(g_mutex);
+    g_backBufferW = d.BufferDesc.Width;
+    g_backBufferH = d.BufferDesc.Height;
+}
+
 // NVIDIA: DLSS-G must be off while the swap chain is resized or changes fullscreen state,
-// or Present can deadlock. Switch it off now and keep it off for a few presents.
+// or Present can deadlock. Switch it off now, free its resources after the next present,
+// and keep it off for kResizeFrames presents.
 void OffForResize(const char* what) {
     if (g_state != State::ok) return;
     {
         std::lock_guard lock(g_mutex);
         g_resizeFrames = kResizeFrames;
     }
+    g_freePending = true;
     if (g_applied != Mode::off && g_applied != Mode::count) ApplyMode(Mode::off, nullptr);
     LOG("fg: DLSS-G off for %s", what);
 }
 
 HRESULT STDMETHODCALLTYPE SlProxySetFullscreenState(IDXGISwapChain* self, BOOL fs, IDXGIOutput* target) {
     OffForResize(fs ? "a switch to fullscreen" : "a switch to windowed");
-    return g_slSetFullscreenState(self, fs, target);
+    const HRESULT hr = g_slSetFullscreenState(self, fs, target);
+    UpdateBackBufferSize(self);
+    return hr;
 }
 
 HRESULT STDMETHODCALLTYPE SlProxyResizeBuffers(IDXGISwapChain* self, UINT n, UINT w, UINT h, DXGI_FORMAT f, UINT flags) {
     OffForResize("a swap chain resize");
-    return g_slResizeBuffers(self, n, w, h, f, flags);
+    const HRESULT hr = g_slResizeBuffers(self, n, w, h, f, flags);
+    UpdateBackBufferSize(self);
+    return hr;
 }
 
 HRESULT STDMETHODCALLTYPE SlProxyResizeBuffers1(IDXGISwapChain3* self, UINT n, UINT w, UINT h, DXGI_FORMAT f, UINT flags,
                                                 const UINT* masks, IUnknown* const* queues) {
     OffForResize("a swap chain resize");
-    return g_slResizeBuffers1(self, n, w, h, f, flags, masks, queues);
+    const HRESULT hr = g_slResizeBuffers1(self, n, w, h, f, flags, masks, queues);
+    UpdateBackBufferSize(self);
+    return hr;
 }
 
 void AttachToSlSwapchain(IDXGISwapChain* sc) {
@@ -623,6 +651,7 @@ void AttachToSlSwapchain(IDXGISwapChain* sc) {
     PatchSlot(sc, 13, &SlProxyResizeBuffers, g_slResizeBuffers, "SL IDXGISwapChain::ResizeBuffers");
     PatchSlot(sc, 22, &SlProxyPresent1, g_slPresent1, "SL IDXGISwapChain1::Present1");
     PatchSlot(sc, 39, &SlProxyResizeBuffers1, g_slResizeBuffers1, "SL IDXGISwapChain3::ResizeBuffers1");
+    UpdateBackBufferSize(sc);
     std::lock_guard lock(g_mutex);
     g_optionsDirty = true;
     SetStatus("swap chain created through Streamline");
@@ -795,9 +824,12 @@ bool IsRealPresent() {
 void TagFrame(const FrameInputs& in) {
     if (g_state != State::ok || !g_slSwapchain || !in.renderW || !in.renderH) return;
     sl::FrameToken* token;
+    uint32_t bbW, bbH;
     {
         std::lock_guard lock(g_mutex);
         token = g_token;
+        bbW = g_backBufferW ? g_backBufferW : in.backBufferW;
+        bbH = g_backBufferH ? g_backBufferH : in.backBufferH;
     }
 
     sl::Constants c;
@@ -843,9 +875,9 @@ void TagFrame(const FrameInputs& in) {
     sl::Resource motion(sl::ResourceType::eTex2d, in.motion, nullptr, nullptr, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     const sl::Extent render{0, 0, in.renderW, in.renderH};
     // Letterboxed shots: the view sits centred in the back buffer (3840x1600 at y 280 in 2160).
-    sl::Extent screen{0, 0, in.backBufferW, in.backBufferH};
-    if (in.backBufferW >= in.outW && in.backBufferH >= in.outH && in.outW && in.outH)
-        screen = {(in.backBufferH - in.outH) / 2, (in.backBufferW - in.outW) / 2, in.outW, in.outH};
+    sl::Extent screen{0, 0, bbW, bbH};
+    if (bbW >= in.outW && bbH >= in.outH && in.outW && in.outH)
+        screen = {(bbH - in.outH) / 2, (bbW - in.outW) / 2, in.outW, in.outH};
     const sl::ResourceTag tags[] = {
         sl::ResourceTag(&depth, sl::kBufferTypeDepth, life, &render),
         sl::ResourceTag(&motion, sl::kBufferTypeMotionVectors, life, &render),
