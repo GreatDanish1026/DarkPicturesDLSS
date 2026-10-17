@@ -1395,3 +1395,5 @@ Stabilise off).
   placeholder stretches ran DLSS with camera motion (0.1.11). Frame generation was off.
 - So all four Dark Pictures games (House of Ashes, Little Hope, Man of Medan, The Devil in Me) share
   one renderer layout. Directive 8020 (probably UE5, not checked) is the only one left out.
+- **Frame generation (user report, 2026-10-17):** works as expected in Little Hope and Man of Medan. All
+  four games are now covered for DLSS and frame generation.

@@ -13,7 +13,7 @@ Version **0.1.13**.
 | House of Ashes | Supported: DLSS, frame generation, all quality modes |
 | The Devil in Me | Supported: DLSS, frame generation, all quality modes |
 | Little Hope | Supported: DLSS, frame generation, all quality modes |
-| Man of Medan | Supported: DLSS, all quality modes (frame generation not tested yet) |
+| Man of Medan | Supported: DLSS, frame generation, all quality modes |
 
 ## Requirements
 
