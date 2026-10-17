@@ -3,6 +3,12 @@
 //   OutMotion: motion vectors in render pixels, pointing from this frame's pixel to
 //              where it was last frame (DLSS convention, MV scale 1).
 //   OutDepth:  device depth as R32_FLOAT (DLSS can't read the game's R32G8X24 typeless).
+//   OutMask:   DLSS's "bias current colour" mask: 1 where a moving object was in the last
+//              few frames but isn't any more. DLSS model J keeps the object's old colour
+//              there when the background is dark and still (striped trails behind a fast
+//              hand in The Devil in Me); the mask tells it to take the current frame.
+//   OutTrail:  per pixel, how recently a moving object covered it (1 = this frame, minus
+//              Trail.y per frame), read back next frame as PrevTrail.
 //
 // UE writes velocity only for moving objects (encoded, x > 0). Every other pixel moved
 // only because the camera did, which View.ClipToPrevClip reprojects, the same way
@@ -16,10 +22,15 @@ cbuffer Constants : register(b0)
     float4 Flags;                        // x: 1 = ignore the game's velocity (camera motion only)
                                          // y: > 0 = use camera motion where the game's velocity
                                          //    differs from it by more than y pixels (after cuts)
+    float4 Trail;                        // x: > 0 = trail mask on; an object pixel is moving when
+                                         //    its velocity differs from camera motion by more
+                                         //    than x pixels. y: fade per frame. z: 1 = forget
+                                         //    the previous trail (camera cut, size change)
 };
 
 Texture2D<float4> Velocity : register(t0);  // RGBA16_UNORM, UE EncodeVelocityToTexture
 Texture2D<float> Depth : register(t1);      // R32_FLOAT_X8X24 view of the scene depth
+Texture2D<float> PrevTrail : register(t2);  // R8_UNORM, last frame's OutTrail
 
 RWTexture2D<float2> OutMotion : register(u0);
 RWTexture2D<float> OutDepth : register(u1);
@@ -30,8 +41,10 @@ RWTexture2D<float> OutDepth : register(u1);
 // 6 ~min depth bits (non-zero depths), 7 max depth bits. Over object-velocity pixels:
 // 8 sum of |decoded velocity| x16 px, 9 sum of |camera reprojection| x16 px (what the
 // pixel would move if it were static), 10 decoded > 4x camera + 1 px, 11 rejected by
-// Flags.y (camera motion used instead).
+// Flags.y (camera motion used instead), 12 in the trail mask, 13 moving object pixels.
 RWBuffer<uint> Stats : register(u2);
+RWTexture2D<float> OutTrail : register(u3);  // R8_UNORM
+RWTexture2D<float> OutMask : register(u4);   // R8_UNORM, render resolution
 
 float2 DecodeVelocity(float4 encoded)
 {
@@ -66,6 +79,35 @@ void main(uint2 id : SV_DispatchThreadID)
     OutMotion[id] = motion;
     OutDepth[id] = deviceZ;
 
+    // Trail mask. Where this pixel was last frame (motion points there), the most recent
+    // coverage by a moving object in a 3x3 neighbourhood (covers rounding and thin edges).
+    bool moving = false, masked = false;
+    if (Trail.x > 0.0)
+    {
+        moving = hasObject && length(decoded - camera) > Trail.x;
+        float recent = 0.0;
+        if (Trail.z == 0.0)
+        {
+            const int2 prev = (int2)floor((float2)id + 0.5 + motion);
+            const int2 last = (int2)ViewSize - 1;
+            [unroll] for (int y = -1; y <= 1; ++y)
+                [unroll] for (int x = -1; x <= 1; ++x)
+                {
+                    const int2 p = prev + int2(x, y);
+                    if (all(p >= 0) && all(p <= last))
+                        recent = max(recent, PrevTrail[p]);
+                }
+        }
+        masked = !moving && recent > 0.1;
+        OutTrail[id] = moving ? 1.0 : max(recent - Trail.y, 0.0);
+        OutMask[id] = masked ? 1.0 : 0.0;
+    }
+    else
+    {
+        OutTrail[id] = 0.0;
+        OutMask[id] = 0.0;
+    }
+
     if ((id.x & 3) == 0 && (id.y & 3) == 0)
     {
         const float length = min(sqrt(dot(motion, motion)), 4096.0);
@@ -95,5 +137,9 @@ void main(uint2 id : SV_DispatchThreadID)
             if (stale)
                 InterlockedAdd(Stats[11], 1);
         }
+        if (masked)
+            InterlockedAdd(Stats[12], 1);
+        if (moving)
+            InterlockedAdd(Stats[13], 1);
     }
 }

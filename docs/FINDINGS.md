@@ -1266,3 +1266,19 @@ is saved (`FullscreenMode=0`). ReShade 6.8 was copied from House of Ashes for th
   A/B is still to do.
 - A second ReShade add-on, `DarkPicturesRT.addon64` 0.0.1, was in the game folder for this run (09:51,
   not from this branch). Its log is a console-variable dump, with nothing that changes rendering.
+
+### 0.1.6: a bias-current-colour mask behind moving objects (prototype)
+
+- Aim: keep model J and stop its trails. DLSS takes an optional "bias current colour" mask (render
+  resolution, 1 = use the current frame), which we didn't send before.
+- `dlss_prepare.hlsl` now also writes:
+  - **a trail texture** (R8, two used in turn): 1 where an object moves more than 1.5 px beyond camera
+    motion, otherwise last frame's value at this pixel's previous position (3x3 max), minus 0.2;
+  - **the mask**: 1 on pixels that aren't moving now but a moving object covered in the last ~4 frames.
+    That's where the trail forms. The moving object itself and still scenery aren't masked, so they keep
+    J's history. The trail is forgotten at cuts and while motion is camera-only.
+- Passed as `pInBiasCurrentColorMask`. Advanced: "Reduce trails behind moving objects" (on by default,
+  saved as `TrailMask`). With Verbose log, a line every 60 frames gives the share of moving-object
+  and masked pixels.
+- Untested. The Devil in Me still defaults to E (0.1.4); to test the mask, pick J in Advanced and
+  compare the fast sweep with the box ticked and unticked.

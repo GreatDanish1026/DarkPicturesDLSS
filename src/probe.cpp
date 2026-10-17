@@ -1630,8 +1630,10 @@ void LoadSettings() {
     unsigned int preset = o.preset;
     if (reshade::get_config_value(nullptr, kConfigSection, "Preset", preset)) o.preset = preset;
     reshade::get_config_value(nullptr, kConfigSection, "StabiliseLighting", o.clampLightingHistory);
-    Log("settings: DLSS %s, %s, render scale %.1f%%, preset %u, stabilise lighting %d", o.enabled ? "on" : "off",
-        kQualityModes[g_quality].name, g_forcePercentage, o.preset, o.clampLightingHistory);
+    reshade::get_config_value(nullptr, kConfigSection, "TrailMask", o.trailMask);
+    Log("settings: DLSS %s, %s, render scale %.1f%%, preset %u, stabilise lighting %d, trail mask %d",
+        o.enabled ? "on" : "off", kQualityModes[g_quality].name, g_forcePercentage, o.preset, o.clampLightingHistory,
+        o.trailMask);
 }
 
 void SaveSettings() {
@@ -1641,6 +1643,7 @@ void SaveSettings() {
     reshade::set_config_value(nullptr, kConfigSection, "CustomScale", g_forcePercentage);
     reshade::set_config_value(nullptr, kConfigSection, "Preset", static_cast<unsigned int>(o.preset));
     reshade::set_config_value(nullptr, kConfigSection, "StabiliseLighting", o.clampLightingHistory);
+    reshade::set_config_value(nullptr, kConfigSection, "TrailMask", o.trailMask);
 }
 
 // One plain line for the overlay.
@@ -1779,6 +1782,10 @@ void DrawOverlay(effect_runtime*) {
         if (ImGui::SliderFloat("Custom render scale", &g_forcePercentage, 33.0f, 100.0f, "%.0f%%"))
             g_quality = kCustomQuality;
         ImGui::Checkbox("Stabilise screen-space lighting (SSGI/SSR mods)", &o.clampLightingHistory);
+        ImGui::Checkbox("Reduce trails behind moving objects", &o.trailMask);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Tells DLSS to use the current frame where a moving object has just been.\n"
+                              "Stops trails behind fast hands against dark backgrounds.");
     }
     if (ImGui::CollapsingHeader("Diagnostics")) DrawDiagnostics();
 
@@ -1789,14 +1796,16 @@ void DrawOverlay(effect_runtime*) {
     if (o.enabled != logged.enabled || o.flipJitterX != logged.flipJitterX || o.flipJitterY != logged.flipJitterY ||
         o.mvJittered != logged.mvJittered || o.invertMotion != logged.invertMotion ||
         o.ignoreVelocity != logged.ignoreVelocity || o.clampLightingHistory != logged.clampLightingHistory ||
+        o.trailMask != logged.trailMask ||
         o.passPreExposure != logged.passPreExposure || o.gameExposure != logged.gameExposure || o.preset != logged.preset ||
         o.logBrightness != logged.logBrightness || o.verboseLog != logged.verboseLog || g_quality != loggedQuality ||
         g_forcePercentage != loggedScale) {
         Log("options at frame %llu: DLSS %s, %s %.1f%%, preset %u, stabilise lighting %d, pre-exposure %d, game exposure %d, "
-            "flip jitter X %d Y %d, MVs jittered %d, invert MVs %d, ignore velocity %d, verbose log %d, log brightness %d",
+            "flip jitter X %d Y %d, MVs jittered %d, invert MVs %d, ignore velocity %d, verbose log %d, log brightness %d, "
+            "trail mask %d",
             static_cast<unsigned long long>(g_frame), o.enabled ? "on" : "off", kQualityModes[g_quality].name,
             g_forcePercentage, o.preset, o.clampLightingHistory, o.passPreExposure, o.gameExposure, o.flipJitterX,
-            o.flipJitterY, o.mvJittered, o.invertMotion, o.ignoreVelocity, o.verboseLog, o.logBrightness);
+            o.flipJitterY, o.mvJittered, o.invertMotion, o.ignoreVelocity, o.verboseLog, o.logBrightness, o.trailMask);
         logged = o;
         loggedQuality = g_quality;
         loggedScale = g_forcePercentage;

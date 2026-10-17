@@ -46,7 +46,7 @@ namespace {
 
 // NGX project id for this mod (any fixed GUID; identifies the app to NGX).
 constexpr char kProjectId[] = QDLSS_NGX_PROJECT_ID;
-constexpr uint32_t kConstants = 24;  // float4x4 + float2 + float2 + float4 flags
+constexpr uint32_t kConstants = 28;  // float4x4 + float2 + float2 + float4 flags + float4 trail
 
 enum class Init { untried, ok, failed };
 Init g_init = Init::untried;
@@ -96,6 +96,14 @@ pipeline g_pso = {};
 
 resource g_motion = {}, g_depth = {};
 resource_view g_motionUav = {}, g_depthUav = {};
+// Trail mask (dlss_prepare.hlsl): two R8 trail textures used in turn (one read, one
+// written), and the bias-current-colour mask DLSS reads.
+constexpr float kTrailMovePx = 1.5f;  // object velocity beyond camera motion that counts as moving
+constexpr float kTrailFade = 0.2f;    // per frame: masked for 4 frames after an object leaves
+resource g_trail[2] = {}, g_mask = {};
+resource_view g_trailUav[2] = {}, g_trailSrv[2] = {}, g_maskUav = {};
+uint32_t g_trailIndex = 0;      // g_trail[g_trailIndex] is written this frame
+bool g_trailValid = false;      // the other one holds last frame's trail
 uint32_t g_texW = 0, g_texH = 0;
 
 std::unordered_map<uint64_t, resource_view> g_srvs;  // game texture -> our SRV of it
@@ -192,7 +200,7 @@ bool InitNgx(device* dev) {
 // kStatsRing frames later, then logged every kStatsLogEvery DLSS frames.
 
 constexpr uint32_t kStatsRing = 4;
-constexpr uint32_t kStatsWords = 12;
+constexpr uint32_t kStatsWords = 14;
 constexpr uint64_t kStatsLogEvery = 60;
 resource g_stats[kStatsRing] = {}, g_statsReadback[kStatsRing] = {}, g_statsZero = {};
 resource_view g_statsUav[kStatsRing] = {};
@@ -254,6 +262,8 @@ void CollectStats(device* dev, uint32_t slot) {
     for (uint32_t i = 0; i < 4; ++i) g_statsSum[i] += s[i];
     g_statsSum[5] += s[5];
     for (uint32_t i = 8; i <= 10; ++i) g_statsSum[i] += s[i];
+    g_statsSum[12] += s[12];
+    g_statsSum[13] += s[13];
     g_statsMax = std::max(g_statsMax, s[4]);
     if (s[6]) g_statsDepthMin = std::min(g_statsDepthMin, ~s[6]);
     g_statsDepthMax = std::max(g_statsDepthMax, s[7]);
@@ -273,6 +283,9 @@ void CollectStats(device* dev, uint32_t slot) {
         "%.1f%% sky, depth %.6f..%.6f",
         g_statsFrames, 100.0 * g_statsSum[1] / n, 100.0 * g_statsSum[2] / n, g_statsSum[3] / 4.0 / n, g_statsMax / 16.0,
         100.0 * g_statsSum[5] / n, g_statsDepthMin == 0xffffffffu ? 0.0f : dmin, dmax);
+    if (g_options.trailMask)
+        LOG("dlss: trail mask over %u frames: %.2f%% moving object pixels, %.2f%% masked behind them", g_statsFrames,
+            100.0 * g_statsSum[13] / n, 100.0 * g_statsSum[12] / n);
     // Object-velocity pixels: decoded game velocity vs what camera motion alone predicts.
     // On static objects these match if the decode is right.
     if (g_statsSum[1]) {
@@ -466,11 +479,11 @@ bool CreatePipeline(device* dev) {
     descriptor_range srvs;
     srvs.binding = 0;
     srvs.dx_register_index = 0;
-    srvs.count = 2;
+    srvs.count = 3;  // velocity, depth, previous trail
     srvs.visibility = shader_stage::compute;
     srvs.type = descriptor_type::shader_resource_view;
     descriptor_range uavs = srvs;
-    uavs.count = 3;  // motion, depth, stats buffer
+    uavs.count = 5;  // motion, depth, stats buffer, trail, mask
     uavs.type = descriptor_type::unordered_access_view;
     params[1].type = pipeline_layout_param_type::push_descriptors_with_ranges;
     params[1].descriptor_table = {1, &srvs};
@@ -605,6 +618,18 @@ void DestroyTextures(device* dev) {
     if (g_depth.handle) dev->destroy_resource(g_depth);
     g_motionUav = g_depthUav = {};
     g_motion = g_depth = {};
+    for (uint32_t i = 0; i < 2; ++i) {
+        if (g_trailUav[i].handle) dev->destroy_resource_view(g_trailUav[i]);
+        if (g_trailSrv[i].handle) dev->destroy_resource_view(g_trailSrv[i]);
+        if (g_trail[i].handle) dev->destroy_resource(g_trail[i]);
+        g_trailUav[i] = g_trailSrv[i] = {};
+        g_trail[i] = {};
+    }
+    if (g_maskUav.handle) dev->destroy_resource_view(g_maskUav);
+    if (g_mask.handle) dev->destroy_resource(g_mask);
+    g_maskUav = {};
+    g_mask = {};
+    g_trailValid = false;
     g_texW = g_texH = 0;
 }
 
@@ -618,10 +643,16 @@ bool CreateTexture(device* dev, uint32_t w, uint32_t h, format fmt, resource& re
 bool EnsureTextures(device* dev, uint32_t w, uint32_t h) {
     if (g_motion.handle && g_texW == w && g_texH == h) return true;
     DestroyTextures(dev);
-    if (!CreateTexture(dev, w, h, format::r16g16_float, g_motion, g_motionUav) ||
-        !CreateTexture(dev, w, h, format::r32_float, g_depth, g_depthUav)) {
+    bool ok = CreateTexture(dev, w, h, format::r16g16_float, g_motion, g_motionUav) &&
+              CreateTexture(dev, w, h, format::r32_float, g_depth, g_depthUav) &&
+              CreateTexture(dev, w, h, format::r8_unorm, g_mask, g_maskUav);
+    for (uint32_t i = 0; i < 2 && ok; ++i)
+        ok = CreateTexture(dev, w, h, format::r8_unorm, g_trail[i], g_trailUav[i]) &&
+             dev->create_resource_view(g_trail[i], resource_usage::shader_resource, resource_view_desc(format::r8_unorm),
+                                       &g_trailSrv[i]);
+    if (!ok) {
         DestroyTextures(dev);
-        SetStatus("could not create the %ux%u motion vector / depth textures", w, h);
+        SetStatus("could not create the %ux%u motion vector / depth / trail textures", w, h);
         return false;
     }
     g_texW = w;
@@ -790,6 +821,13 @@ Result Evaluate(const Frame& f) {
     constants[20] = cameraOnly ? 1.0f : 0.0f;
     constants[21] = staleThreshold;
     constants[22] = constants[23] = 0.0f;
+    // Trail mask: forget the previous trail at a cut, or when there isn't one.
+    const bool trail = g_options.trailMask;
+    const uint32_t trailOut = g_trailIndex, trailIn = g_trailIndex ^ 1u;
+    constants[24] = trail ? kTrailMovePx : 0.0f;
+    constants[25] = kTrailFade;
+    constants[26] = (!g_trailValid || reset || cameraOnly) ? 1.0f : 0.0f;
+    constants[27] = 0.0f;
     // Diagnostics slot for this frame: read what it held kStatsRing frames ago, clear it.
     const uint32_t slot = static_cast<uint32_t>(g_statsFrame++ % kStatsRing);
     CollectStats(dev, slot);
@@ -799,13 +837,17 @@ Result Evaluate(const Frame& f) {
 
     cmd->bind_pipeline(pipeline_stage::compute_shader, g_pso);
     cmd->push_constants(shader_stage::compute, g_layout, 0, 0, kConstants, constants);
-    const resource_view srvs[2] = {velocitySrv, depthSrv};
-    const resource_view uavs[3] = {g_motionUav, g_depthUav, g_statsUav[slot]};
+    const resource_view srvs[3] = {velocitySrv, depthSrv, g_trailSrv[trailIn]};
+    const resource_view uavs[5] = {g_motionUav, g_depthUav, g_statsUav[slot], g_trailUav[trailOut], g_maskUav};
     cmd->push_descriptors(shader_stage::compute, g_layout, 1,
-                          descriptor_table_update{{}, 0, 0, 2, descriptor_type::shader_resource_view, srvs});
+                          descriptor_table_update{{}, 0, 0, 3, descriptor_type::shader_resource_view, srvs});
     cmd->push_descriptors(shader_stage::compute, g_layout, 2,
-                          descriptor_table_update{{}, 0, 0, 3, descriptor_type::unordered_access_view, uavs});
+                          descriptor_table_update{{}, 0, 0, 5, descriptor_type::unordered_access_view, uavs});
+    cmd->barrier(g_trail[trailIn], resource_usage::unordered_access, resource_usage::shader_resource);
     cmd->dispatch((f.renderW + 7) / 8, (f.renderH + 7) / 8, 1);
+    cmd->barrier(g_trail[trailIn], resource_usage::shader_resource, resource_usage::unordered_access);
+    g_trailIndex = trailIn;
+    g_trailValid = trail;
 
     cmd->barrier(g_stats[slot], resource_usage::unordered_access, resource_usage::copy_source);
     cmd->copy_buffer_region(g_stats[slot], 0, g_statsReadback[slot], 0, kStatsWords * 4);
@@ -853,10 +895,12 @@ Result Evaluate(const Frame& f) {
         LOG("capture: copied DLSS inputs of frame %llu (age %u)", static_cast<unsigned long long>(f.frame), age);
     }
 
-    const resource ours[2] = {g_motion, g_depth};
-    const resource_usage uav[2] = {resource_usage::unordered_access, resource_usage::unordered_access};
-    const resource_usage srv[2] = {resource_usage::shader_resource, resource_usage::shader_resource};
-    cmd->barrier(2, ours, uav, srv);
+    const resource ours[3] = {g_motion, g_depth, g_mask};
+    const resource_usage uav[3] = {resource_usage::unordered_access, resource_usage::unordered_access,
+                                   resource_usage::unordered_access};
+    const resource_usage srv[3] = {resource_usage::shader_resource, resource_usage::shader_resource,
+                                   resource_usage::shader_resource};
+    cmd->barrier(3, ours, uav, srv);
 
     // 2. DLSS into the game's TAAU output.
     auto list = reinterpret_cast<ID3D12GraphicsCommandList*>(cmd->get_native());
@@ -865,6 +909,8 @@ Result Evaluate(const Frame& f) {
     e.Feature.pInOutput = reinterpret_cast<ID3D12Resource*>(f.output.handle);
     e.pInDepth = reinterpret_cast<ID3D12Resource*>(g_depth.handle);
     e.pInMotionVectors = reinterpret_cast<ID3D12Resource*>(g_motion.handle);
+    // 1 = take the current frame: where a moving object has just been (dlss_prepare.hlsl).
+    if (trail) e.pInBiasCurrentColorMask = reinterpret_cast<ID3D12Resource*>(g_mask.handle);
     e.InJitterOffsetX = g_options.flipJitterX ? -f.jitterX : f.jitterX;
     e.InJitterOffsetY = g_options.flipJitterY ? -f.jitterY : f.jitterY;
     e.InRenderSubrectDimensions = {f.renderW, f.renderH};
@@ -879,7 +925,7 @@ Result Evaluate(const Frame& f) {
     // with auto exposure off.
     if (!key.autoExposure) e.pInExposureTexture = reinterpret_cast<ID3D12Resource*>(f.exposure.handle);
     const NVSDK_NGX_Result r = NGX_D3D12_EVALUATE_DLSS_EXT(list, feature->handle, g_params, &e);
-    cmd->barrier(2, ours, srv, uav);
+    cmd->barrier(3, ours, srv, uav);
     if (NVSDK_NGX_FAILED(r)) {
         ++g_failures;
         SetStatus("DLSS evaluate failed (0x%08x)", static_cast<unsigned>(r));

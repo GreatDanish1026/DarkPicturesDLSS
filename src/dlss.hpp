@@ -50,6 +50,9 @@ struct Options {
     // J by default: K (the default for Quality) ignores the current frame for ~70 frames in the
     // "Yah!" shot (FINDINGS.md). An NVIDIA App / driver override takes precedence.
     uint32_t preset = 10;
+    // Bias-current-colour mask behind moving objects (dlss_prepare.hlsl): stops model J's
+    // striped trails behind a fast hand against a dark background (The Devil in Me).
+    bool trailMask = true;
     bool logBrightness = false;  // one log line per DLSS frame: input / DLSS / clamped luma
     bool verboseLog = false;     // motion statistics after resets and every 60 frames
 };
