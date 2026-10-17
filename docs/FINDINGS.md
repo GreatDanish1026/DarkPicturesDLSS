@@ -1359,3 +1359,13 @@ D3D12). Settings: 3840x2160, `FullscreenMode=0`.
   Objects that move on their own get no motion vectors in those frames. UE only binds the placeholder
   when nothing wrote velocity, so there shouldn't be any. To check: the Little Hope cutscene that fell
   back for 18 s.
+- **0.1.11 run (2026-10-17 11:03-11:04): DLSS stays on without game velocity.** User report: DLSS
+  stayed active. Log: the placeholder stretch at 11:04:13-11:04:18 ran DLSS with camera motion only and
+  no fallback. The only fallbacks left are the "not ready for this size" frame at each new size and one
+  loading moment. The game's velocity also flickers on and off for single frames (frames 179-196),
+  which no longer matters.
+- At that loading moment (11:04:20) the main-TAA guess picked up a 1280x10 temporal pass (input 0x0).
+  It was tried as a TAAU and failed safely ("could not be resolved", "constants could not be read")
+  a few dozen times. **0.1.12:** the guess also needs a non-empty input and an output of at least a
+  quarter of the back buffer. The velocity log line now prints the placeholder size (it printed a
+  literal format string).

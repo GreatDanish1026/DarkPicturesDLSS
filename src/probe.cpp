@@ -1160,8 +1160,11 @@ bool IsTaau(uint64_t key) {
     for (uint64_t k : kTaauShaders)
         if (k == key) return true;
     // The guess must itself upscale (by texture sizes): at 100% the guess can be the SSGI
-    // denoiser b569efd647217872, whose constants mean something else.
-    if (key && key == g_mainKey && g_mainOutW > g_mainInW) {
+    // denoiser b569efd647217872, whose constants mean something else. And its output must
+    // cover at least a quarter of the back buffer: on a Little Hope loading screen the only
+    // temporal pass was a 1280x10 one (input 0x0), which it then tried every frame.
+    if (key && key == g_mainKey && g_mainInW > 0 && g_mainOutW > g_mainInW &&
+        uint64_t(g_mainOutW) * g_mainOutH * 4 >= uint64_t(g_bbW) * g_bbH) {
         static uint64_t logged = 0;
         if (logged != key) {
             logged = key;
@@ -1271,9 +1274,9 @@ bool BuildDlssFrame(command_list* cmd, const ContextState& st, dlss::Frame& f, s
         static uint32_t changes = 0;
         if (f.noVelocity != logged && ++changes <= 40) {
             logged = f.noVelocity;
-            Log("dlss: %s at frame %llu", f.noVelocity ? "no game velocity (placeholder %ux%u): camera motion only"
-                                                       : "game velocity back (%ux%u)",
-                static_cast<unsigned long long>(g_frame), velocityDesc.texture.width, velocityDesc.texture.height);
+            Log("dlss: %s (%ux%u) at frame %llu",
+                f.noVelocity ? "no game velocity, camera motion only: placeholder" : "game velocity back",
+                velocityDesc.texture.width, velocityDesc.texture.height, static_cast<unsigned long long>(g_frame));
         }
     }
     // Specific reasons, without per-frame values like jitter, so the log only records changes.
