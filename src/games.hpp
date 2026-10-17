@@ -14,8 +14,9 @@ struct GameInfo {
 
 #if defined(QDLSS_DARK_PICTURES)
 constexpr GameInfo kGames[] = {
-    {L"HouseOfAshes-Win64-Shipping.exe", "House of Ashes"},  // UE 4.26, SMG025
-    // Model E: J leaves striped trails behind fast hands against dark backgrounds (FINDINGS.md).
+    // Model E: J leaves striped trails behind fast hands against dark backgrounds, and ignores
+    // DLSS's bias-current-colour mask (FINDINGS.md). Seen in both games.
+    {L"HouseOfAshes-Win64-Shipping.exe", "House of Ashes", 5},   // UE 4.26, SMG025
     {L"TheDevilInMe-Win64-Shipping.exe", "The Devil in Me", 5},  // UE 4.26, SMG028
 };
 #else

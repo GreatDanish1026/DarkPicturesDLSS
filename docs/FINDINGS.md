@@ -1310,3 +1310,6 @@ is saved (`FullscreenMode=0`). ReShade 6.8 was copied from House of Ashes for th
 - **Conclusion: model J barely uses the bias-current-colour mask, so the trail can't be fixed from our
   side; model E stays The Devil in Me's default.** The mask stays in the code, off by default
   (`TrailMask`), for a later model or another game.
+- **House of Ashes too (user report, 2026-10-17):** the same model J trail behind fast hands. **0.1.8:**
+  House of Ashes also defaults to model E, and the README says E is the default. The saved `Preset` in
+  both games' ReShade.ini was set to 5 to match (and `TrailMask` to 0 in The Devil in Me).
