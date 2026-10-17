@@ -665,46 +665,46 @@ Streamline is only initialised once a swap chain is being created (factory) or e
   the real DXGI function. Log callers now read "ReShade" or "the game exe", since both
   modules are named dxgi.dll.
 
-### Run 2 (1.0.0-fg.2, factory hook, 2026-10-16 13:50-13:51): DLSS-G works
-
-- **User report: frame generation works, with no visible artifacts.**
-- The hook engaged as intended: `CreateSwapChain from ReShade`, then `CreateSwapChain
-  through Streamline: 0x00000000`, so the order is game -> ReShade -> Streamline -> DXGI.
-  Streamline coexists with ReShade this way.
-- `slInit`, then DLSS-G, Reflex and PCL all report loaded and supported (driver 617.42, HW
-  scheduling required and on). Status `0x0 ok` from the first present. Max generated frames
-  is **5** on the RTX 5080 (up to 6x).
-- **Generated frames and pacing** (the 2-second log lines in gameplay):
-
-  | Mode | Real frames | Presented by SL | Real frame time sd / max |
-  |---|---|---|---|
-  | 3x (2 generated) | 52.0 fps | 156 fps (3.00 per real frame) | 0.2-1.4 ms / 20-29 ms |
-  | 2x (1 generated, switched live) | 78.0 fps | 156 fps (2.00 per real frame) | 0.2-0.8 ms / 13-16 ms |
-
-  The output stays at ~156 fps in both modes, so it looks capped (probably Reflex/DLSS-G
-  pacing to the display refresh). Switching 3x -> 2x applied on the next present with no
-  hitch. "Below SL" pacing isn't measured in this order: ReShade sits above Streamline,
-  so nothing of ours sees the generated presents. FrameView or the NVIDIA overlay would
-  have to cover display pacing.
-- **Cut frames:** each camera cut logs `Failed to find global tag 'kBufferTypeDepth' /
-  'kBufferTypeMotionVectors'` (and once "Unable to find 'common' constants"). These are
-  the frames where DLSS SR falls back to the game's TAAU (1x1 velocity on cuts), so
-  nothing is tagged and DLSS-G skips generation for that frame. That's harmless and
-  arguably right at a cut. Loading screens log "missing common constants" every frame
-  for the same reason (280 lines in this run). It would be quieter to switch DLSS-G off
-  while DLSS SR isn't running.
-- **NVIDIA App overrides apply:** with the App's DLSS override (DRS `SL_DLSS_OVERRIDE`)
-  on, Streamline loaded its OTA plugins (sl.common/dlss_g/reflex/pcl **2.14.16** from
-  `C:\ProgramData\NVIDIA\NGX\models`) instead of our 2.14.1 copies, and NGX logged
-  "Feature dlssg override enabled". It used the App's frame generation snippet
-  (`dlssg\versions\20318480`), even though `eAllowOTA` isn't set.
-- **Frame generation presets:** there are none to expose. Streamline 2.14.1's
-  `DLSSGOptions` has mode, frame count, flags and dynamic-MFG fields but no preset or
-  model hint. The SDK's lettered presets (A-M) are only for DLSS Super Resolution
-  (`DLSSPreset`) and Ray Reconstruction (`DLSSDPreset`), and the NGX headers have no
-  frame generation preset parameter either. The frame generation model comes from the
-  driver, or from the NVIDIA App's override as above.
-
+### Run 2 (1.0.0-fg.2, factory hook, 2026-10-16 13:50-13:51): DLSS-G works
+
+- **User report: frame generation works, with no visible artifacts.**
+- The hook engaged as intended: `CreateSwapChain from ReShade`, then `CreateSwapChain
+  through Streamline: 0x00000000`, so the order is game -> ReShade -> Streamline -> DXGI.
+  Streamline coexists with ReShade this way.
+- `slInit`, then DLSS-G, Reflex and PCL all report loaded and supported (driver 617.42, HW
+  scheduling required and on). Status `0x0 ok` from the first present. Max generated frames
+  is **5** on the RTX 5080 (up to 6x).
+- **Generated frames and pacing** (the 2-second log lines in gameplay):
+
+  | Mode | Real frames | Presented by SL | Real frame time sd / max |
+  |---|---|---|---|
+  | 3x (2 generated) | 52.0 fps | 156 fps (3.00 per real frame) | 0.2-1.4 ms / 20-29 ms |
+  | 2x (1 generated, switched live) | 78.0 fps | 156 fps (2.00 per real frame) | 0.2-0.8 ms / 13-16 ms |
+
+  The output stays at ~156 fps in both modes, so it looks capped (probably Reflex/DLSS-G
+  pacing to the display refresh). Switching 3x -> 2x applied on the next present with no
+  hitch. "Below SL" pacing isn't measured in this order: ReShade sits above Streamline,
+  so nothing of ours sees the generated presents. FrameView or the NVIDIA overlay would
+  have to cover display pacing.
+- **Cut frames:** each camera cut logs `Failed to find global tag 'kBufferTypeDepth' /
+  'kBufferTypeMotionVectors'` (and once "Unable to find 'common' constants"). These are
+  the frames where DLSS SR falls back to the game's TAAU (1x1 velocity on cuts), so
+  nothing is tagged and DLSS-G skips generation for that frame. That's harmless and
+  arguably right at a cut. Loading screens log "missing common constants" every frame
+  for the same reason (280 lines in this run). It would be quieter to switch DLSS-G off
+  while DLSS SR isn't running.
+- **NVIDIA App overrides apply:** with the App's DLSS override (DRS `SL_DLSS_OVERRIDE`)
+  on, Streamline loaded its OTA plugins (sl.common/dlss_g/reflex/pcl **2.14.16** from
+  `C:\ProgramData\NVIDIA\NGX\models`) instead of our 2.14.1 copies, and NGX logged
+  "Feature dlssg override enabled". It used the App's frame generation snippet
+  (`dlssg\versions\20318480`), even though `eAllowOTA` isn't set.
+- **Frame generation presets:** there are none to expose. Streamline 2.14.1's
+  `DLSSGOptions` has mode, frame count, flags and dynamic-MFG fields but no preset or
+  model hint. The SDK's lettered presets (A-M) are only for DLSS Super Resolution
+  (`DLSSPreset`) and Ray Reconstruction (`DLSSDPreset`), and the NGX headers have no
+  frame generation preset parameter either. The frame generation model comes from the
+  driver, or from the NVIDIA App's override as above.
+
 - **1.0.0-fg.3:** the overlay checkbox and frame-count slider become one "Frame
   generation" choice: Off / 2x / 3x / 4x / Dynamic (`DLSSGMode::eDynamic`, where
   Streamline picks the multiplier to reach the refresh rate; it falls back to 2x when
@@ -712,33 +712,33 @@ Streamline is only initialised once a swap chain is being created (factory) or e
   fg.1/fg.2's `FrameGenerationOn` / `FrameGenerationFrames` are migrated. Off now sets
   `eRetainResourcesWhenOff`, so switching back on doesn't stutter.
 
-### Run 3 (1.0.0-fg.3, 2026-10-16 14:10): 4x and Dynamic work; Ultra Quality had no DLSS
-
-- **User report: 4x and Dynamic work well; subtitles and QTE prompts show no visual
-  issues.**
-- **4x:** 39 real fps -> 156 presented (4.00 per real frame, real frame sd 0.3 ms).
-  **Dynamic** settled on 2x here: 78 -> 156. Output is held at ~156 fps in every mode
-  (display refresh pacing), so above the needed multiplier a fixed 3x/4x only lowers the
-  real frame rate (52, then 39 fps), and with it responsiveness. Dynamic picks the
-  smallest multiplier that reaches the refresh rate, which makes it the sensible default.
-- **Bug: Ultra Quality turned frame generation off.** In fact it turned DLSS Super
-  Resolution off, and has done since Ultra Quality was added in 0.6.1. At 77% UE 4.26
-  uses another TemporalAA permutation (the screen percentage band 71-100%):
-  **`2f606fcaa114ea67`**, 2960x1664 inputs, 3840x1664 output texture, 3840x1600 view.
-  The add-on only knew `6435b4eb8190e22b` (the 50-71% band: Quality 67%, Balanced 58% and
-  Performance 50% all use it). So at Ultra Quality the game's own TAAU ran: no DLSS
-  frames, nothing tagged ("tagged 0"), and DLSS-G skipped every frame. The NGX line
-  "(UltraQuality) Using App hint Preset J" in earlier logs isn't evidence: NGX logs the
-  hint for every quality mode whenever a feature is created. Ultra Performance (33%)
-  has never been seen in a log and is probably a third permutation.
-- **1.0.0-fg.4:** `2f606fcaa114ea67` is a known TAAU permutation. Any other permutation is
-  tried when it's the probe's current main TAA guess and that guess upscales by texture
-  size. That covers Ultra Performance without knowing its key, and the log names the key
-  the first time. `BuildDlssFrame` now refuses any pass whose render rect isn't smaller
-  than its output ("not upscaling"). So the 100% TAA (`2f606` again) and the SSGI denoiser
-  `b569efd647217872`, which has the same shape and is the main guess at 100%, are never
-  replaced.
-
+### Run 3 (1.0.0-fg.3, 2026-10-16 14:10): 4x and Dynamic work; Ultra Quality had no DLSS
+
+- **User report: 4x and Dynamic work well; subtitles and QTE prompts show no visual
+  issues.**
+- **4x:** 39 real fps -> 156 presented (4.00 per real frame, real frame sd 0.3 ms).
+  **Dynamic** settled on 2x here: 78 -> 156. Output is held at ~156 fps in every mode
+  (display refresh pacing), so above the needed multiplier a fixed 3x/4x only lowers the
+  real frame rate (52, then 39 fps), and with it responsiveness. Dynamic picks the
+  smallest multiplier that reaches the refresh rate, which makes it the sensible default.
+- **Bug: Ultra Quality turned frame generation off.** In fact it turned DLSS Super
+  Resolution off, and has done since Ultra Quality was added in 0.6.1. At 77% UE 4.26
+  uses another TemporalAA permutation (the screen percentage band 71-100%):
+  **`2f606fcaa114ea67`**, 2960x1664 inputs, 3840x1664 output texture, 3840x1600 view.
+  The add-on only knew `6435b4eb8190e22b` (the 50-71% band: Quality 67%, Balanced 58% and
+  Performance 50% all use it). So at Ultra Quality the game's own TAAU ran: no DLSS
+  frames, nothing tagged ("tagged 0"), and DLSS-G skipped every frame. The NGX line
+  "(UltraQuality) Using App hint Preset J" in earlier logs isn't evidence: NGX logs the
+  hint for every quality mode whenever a feature is created. Ultra Performance (33%)
+  has never been seen in a log and is probably a third permutation.
+- **1.0.0-fg.4:** `2f606fcaa114ea67` is a known TAAU permutation. Any other permutation is
+  tried when it's the probe's current main TAA guess and that guess upscales by texture
+  size. That covers Ultra Performance without knowing its key, and the log names the key
+  the first time. `BuildDlssFrame` now refuses any pass whose render rect isn't smaller
+  than its output ("not upscaling"). So the 100% TAA (`2f606` again) and the SSGI denoiser
+  `b569efd647217872`, which has the same shape and is the main guess at 100%, are never
+  replaced.
+
 ### Run 4 (1.0.0-fg.4, 2026-10-16 14:16): the second Ultra Quality bug
 
 - User report: still no frame generation at Ultra Quality.
@@ -1394,4 +1394,4 @@ Stabilise off).
 - Only 4 fallbacks in the whole run, each the "not ready for this size" frame at a new size. Velocity
   placeholder stretches ran DLSS with camera motion (0.1.11). Frame generation was off.
 - So all four Dark Pictures games (House of Ashes, Little Hope, Man of Medan, The Devil in Me) share
-  one renderer layout. Directive 8020 (UE5) is the only one left out.
+  one renderer layout. Directive 8020 (probably UE5, not checked) is the only one left out.
