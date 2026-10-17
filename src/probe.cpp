@@ -1548,6 +1548,10 @@ struct IntOverride {
 IntOverride g_overrides[] = {
     {L"r.SSGI.Enable", "Disable SSGI (r.SSGI.Enable 0, test)", 0},
     {L"r.SSR.Quality", "Disable SSR (r.SSR.Quality 0, test)", 0},
+    // Camera effects the Dark Pictures games have no setting for. Depth of field is mixed into
+    // the scene colour before the TAAU, so it changes what DLSS sees; motion blur runs after it.
+    {L"r.DepthOfFieldQuality", "Disable depth of field (r.DepthOfFieldQuality 0, test)", 0},
+    {L"r.MotionBlurQuality", "Disable motion blur (r.MotionBlurQuality 0, test)", 0},
 };
 
 void ApplyOverrides() {

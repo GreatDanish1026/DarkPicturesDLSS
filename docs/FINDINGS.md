@@ -1249,3 +1249,14 @@ is saved (`FullscreenMode=0`). ReShade 6.8 was copied from House of Ashes for th
 - **0.1.4:** `src/games.hpp` can give a game its own default model, and The Devil in Me defaults to E.
   A model saved in ReShade.ini (picked in Advanced) still wins. House of Ashes stays on J. The 0.1.3
   copy guard and reader logging stay: they're harmless and say where the copy goes in each game.
+
+### 0.1.5: depth of field and motion blur test switches
+
+- The Devil in Me has no setting for its camera effects. In frame dump 2684, depth of field is mixed into
+  the scene colour before the TAAU: pass #109 combines two half-resolution layers from #106/#108. So
+  DLSS gets an already-blurred, low-contrast hand, which may be why J keeps its old colour. Motion blur
+  runs after the upscale.
+- Diagnostics gets "Disable depth of field (r.DepthOfFieldQuality 0, test)" and "Disable motion blur
+  (r.MotionBlurQuality 0, test)", forced through the cvar access like the SSGI/SSR switches. They show
+  only when the cvar is found. Not saved.
+- Next: model J with depth of field off on the fast sweep; then J with "game exposure" off.
