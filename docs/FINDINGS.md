@@ -1203,3 +1203,19 @@ is saved (`FullscreenMode=0`). ReShade 6.8 was copied from House of Ashes for th
   model E.
 - **0.1.2:** the capture header's texture lines are no longer cut short by a long game path (the
   line buffer was 200 characters).
+
+### A/B (0.1.2, 2026-10-17 09:30-09:37): the stabilised-lighting copy makes the ghost
+
+- **User report: with "Stabilise screen-space lighting" off, the moving hand no longer ghosts.** So the
+  ghost comes from the lighting copy, not from DLSS or the motion vectors.
+- The copy goes in before the first pass of the next frame that reads last frame's DLSS output. In The
+  Devil in Me that reader isn't known: frame dump 2684 (gameplay, output ping-ponging) shows only the TAAU
+  reading its own last output, and in the letterboxed cutscene the output is one texture every frame. If
+  the game writes that texture again before the read, the copy puts last frame's image back over the
+  newer one: one-frame-old copies of a fast-moving object.
+- **0.1.3 (shared code):**
+  - the copy is dropped when the game writes its target first (a pass output, a render target of a
+    geometry draw, or a copy destination);
+  - the log names the pass the copy goes in before and any pass that drops it, with the pass index of
+    DLSS, on each change (first 20).
+- Next: the same cutscene with "Stabilise screen-space lighting" back on and Verbose log on.

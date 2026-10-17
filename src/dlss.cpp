@@ -1030,6 +1030,15 @@ bool PatchLightingHistory(command_list* cmd, resource texture, bool compute, uin
     return true;
 }
 
+bool OnGameWrite(resource texture, uint64_t frame) {
+    if (!g_histOutput.handle || texture.handle != g_histOutput.handle) return false;
+    if (g_traceFrames)
+        LOG("dlss: trace: lighting history copy dropped at frame %llu: the game wrote its target",
+            static_cast<unsigned long long>(frame));
+    g_histOutput = {};
+    return true;
+}
+
 void OnSwapchainResize() {
     g_traceFrames = kTraceFrames;
     g_histHoldFrames = kHistHoldFrames;

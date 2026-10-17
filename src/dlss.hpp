@@ -65,6 +65,10 @@ Result Evaluate(const Frame& f);
 // game's SSGI/SSR), copy the clamped version over it first. Once per frame.
 bool PatchLightingHistory(command_list* cmd, resource texture, bool compute, uint64_t frame);
 uint64_t LightingHistoryPatches();
+// The game writes <texture> (a pass output or copy destination). If it's the lighting copy's
+// target, the copy is dropped: it would put back last frame's image over the game's newer one.
+// Returns true when it dropped the copy.
+bool OnGameWrite(resource texture, uint64_t frame);
 // Copies the next DLSS frame's colour, velocity, motion and depth to files next to the exe.
 void RequestCapture(bool afterNextCut = false);  // or 45 frames after the next camera cut
 std::string CaptureStatus();

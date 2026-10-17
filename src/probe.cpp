@@ -523,6 +523,35 @@ std::string DumpConstantBuffers(device* dev, const buffer_range* cbs, const Shad
     return s;
 }
 
+// Which pass the lighting copy lands in front of, and which writes drop it, logged on
+// change (first 20 changes each): it differs between games and decides whether the copy helps.
+uint32_t g_dlssPass = UINT32_MAX;  // pass index of this frame's DLSS evaluate
+uint32_t g_lastDlssPass = UINT32_MAX;
+
+void NoteLightingReader(bool compute, uint64_t key, const char* slot) {
+    static uint64_t lastKey = 0;
+    static uint32_t changes = 0;
+    if (key == lastKey || changes >= 20) return;
+    lastKey = key;
+    ++changes;
+    Log("dlss: lighting history copy goes in before pass #%u %s %016llx (%s) at frame %llu; DLSS ran at pass #%d "
+        "last frame",
+        g_pass, compute ? "CS" : "PS", static_cast<unsigned long long>(key), slot, static_cast<unsigned long long>(g_frame),
+        g_lastDlssPass == UINT32_MAX ? -1 : static_cast<int>(g_lastDlssPass));
+}
+
+void NoteLightingWrite(bool compute, uint64_t key, const char* slot) {
+    static uint64_t lastKey = 0;
+    static uint32_t changes = 0;
+    if (key == lastKey || changes >= 20) return;
+    lastKey = key;
+    ++changes;
+    Log("dlss: lighting history copy dropped: pass #%u %s %016llx writes its target (%s) at frame %llu (DLSS at pass "
+        "#%d this frame)",
+        g_pass, compute ? "CS" : "PS", static_cast<unsigned long long>(key), slot, static_cast<unsigned long long>(g_frame),
+        g_dlssPass == UINT32_MAX ? -1 : static_cast<int>(g_dlssPass));
+}
+
 // A dispatch or full-screen draw: work out its inputs and outputs, flag history
 // reads, and record what it writes.
 void OnPass(command_list* cmd, bool compute, const char* what) {
@@ -565,10 +594,18 @@ void OnPass(command_list* cmd, bool compute, const char* what) {
     }
 
     // Last frame's DLSS output read back by the game's lighting (SSGI/SSR): swap in the
-    // clamped copy before this pass runs, so the feedback loop can't build up.
-    if (d3d12)
+    // clamped copy before this pass runs, so the feedback loop can't build up. Only while
+    // that texture still holds last frame's DLSS output: once the game has written it (The
+    // Devil in Me reuses one output texture), the copy would put an older image back.
+    if (d3d12) {
+        for (const auto& b : out)
+            if (dlss::OnGameWrite(b.res, g_frame)) NoteLightingWrite(compute, key, b.slot);
         for (const auto& b : in)
-            if (dlss::PatchLightingHistory(cmd, b.res, compute, g_frame)) break;
+            if (dlss::PatchLightingHistory(cmd, b.res, compute, g_frame)) {
+                NoteLightingReader(compute, key, b.slot);
+                break;
+            }
+    }
 
     bool history = false;
     uint32_t inW = 0, inH = 0, outW = 0, outH = 0;
@@ -661,7 +698,11 @@ void OnGeometryDraw(command_list* cmd) {
     st.targetsDirty = false;
     device* dev = cmd->get_device();
     for (uint32_t i = 0; i < st.rtvCount && i < kMaxRtv; ++i)
-        if (st.rtv[i].handle) MarkWritten(dev->get_resource_from_view(st.rtv[i]), kGeometryKey);
+        if (st.rtv[i].handle) {
+            const resource r = dev->get_resource_from_view(st.rtv[i]);
+            MarkWritten(r, kGeometryKey);
+            if (g_api == device_api::d3d12 && dlss::OnGameWrite(r, g_frame)) NoteLightingWrite(false, kGeometryKey, "geometry");
+        }
     if (st.dsv.handle) MarkWritten(dev->get_resource_from_view(st.dsv), kGeometryKey);
 }
 
@@ -1305,6 +1346,7 @@ bool OnDispatch(command_list* cmd, uint32_t x, uint32_t y, uint32_t z) {
     const dlss::Result r = dlss::Evaluate(f);
     if (r != dlss::Result::skipped) RestoreComputeState(cmd, saved);
     if (r == dlss::Result::done) {
+        g_dlssPass = g_pass - 1;  // OnPass above counted this dispatch
         g_pendingCut = false;
         g_lastSkipWhy.clear();
     } else {
@@ -1330,6 +1372,7 @@ void OnDestroyDevice(device* dev) {
 
 bool OnCopyResource(command_list* cmd, resource src, resource dst) {
     std::lock_guard lock(g_mutex);
+    if (dlss::OnGameWrite(dst, g_frame)) NoteLightingWrite(false, 0, "copy destination");
     if (auto it = g_writers.find(src.handle); it != g_writers.end()) g_writers[dst.handle] = it->second;
     if (g_dumpFrame && g_frame == g_dumpFrame) {
         auto d = cmd->get_device()->get_resource_desc(dst);
@@ -1372,6 +1415,8 @@ void OnPresent(command_queue*, swapchain*, const rect*, const rect*, uint32_t, c
     UpdateMainGuess();
     ++g_frame;
     g_pass = 0;
+    g_lastDlssPass = g_dlssPass;
+    g_dlssPass = UINT32_MAX;
     g_geometryRun = 0;
 }
 
