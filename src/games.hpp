@@ -18,6 +18,7 @@ constexpr GameInfo kGames[] = {
     // DLSS's bias-current-colour mask (FINDINGS.md). Seen in both games.
     {L"HouseOfAshes-Win64-Shipping.exe", "House of Ashes", 5},   // UE 4.26, SMG025
     {L"TheDevilInMe-Win64-Shipping.exe", "The Devil in Me", 5},  // UE 4.26, SMG028
+    {L"LittleHope-Win64-Shipping.exe", "Little Hope", 5},        // UE 4.26, SMG024 (D3D11 and D3D12 RHIs)
 };
 #else
 constexpr GameInfo kGames[] = {

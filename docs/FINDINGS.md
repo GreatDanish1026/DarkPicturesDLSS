@@ -1313,3 +1313,17 @@ is saved (`FullscreenMode=0`). ReShade 6.8 was copied from House of Ashes for th
 - **House of Ashes too (user report, 2026-10-17):** the same model J trail behind fast hands. **0.1.8:**
   House of Ashes also defaults to model E, and the README says E is the default. The saved `Preset` in
   both games' ReShade.ini was set to 5 to match (and `TrailMask` to 0 in The Devil in Me).
+
+## The Dark Pictures Anthology: Little Hope
+
+Little Hope (Steam app 1194630, build 11200128, `SMG024\Binaries\Win64\LittleHope-Win64-Shipping.exe`) is
+**UE 4.26** ("++UE4+Release-4.26") with both the D3D11 and D3D12 RHIs compiled in, no upscaler of its own
+and Aftermath. No game log yet, so which RHI it runs by default is for the first run to show (DLSS needs
+D3D12). Settings: 3840x2160, `FullscreenMode=0`.
+
+- **0.1.9:** Little Hope added to `src/games.hpp` (default model E) and `build.ps1`'s exe list.
+- Probe setup: 0.1.9 and the NVIDIA runtime installed, frame generation off. ReShade 6.8.0.2152 was
+  already in the folder from an earlier experiment (renodx-dlss5 / dlss5-feed, September; those add-ons
+  were no longer there). Copying House of Ashes' `dxgi.dll` (the same version) and `ReShade.ini` over it
+  replaced that ini; its 2026-09-19 backup (`ReShade.ini.renodx-dlss5-pre-v4-migration-...bak`) is still
+  in the folder.
