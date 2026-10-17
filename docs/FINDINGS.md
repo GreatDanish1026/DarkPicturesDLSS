@@ -1171,3 +1171,17 @@ is saved (`FullscreenMode=0`). ReShade 6.8 was copied from House of Ashes for th
 - Next: the same scene with the NVIDIA App's DLSS model override off for The Devil in Me (so J
   applies), with Verbose log and "Log brightness" on. If it persists, try "Stabilise screen-space
   lighting" off and "Ignore game velocity" (test) on the same shot.
+
+### Fourth run (0.1.1, 2026-10-17 08:03-08:04): model J fixes the blocks, the moving hand still ghosts
+
+- With the NVIDIA App override off, NGX logs "Using App hint Preset J" and the override status
+  "Value: 10, Requested: Yes, Applied: No". **The same cutscene (screenshot 08:04:01, 14 s into the shot
+  cut at 08:03:47) is clean**: no stale rectangles, sharp face, hat and vest. So the rectangles and
+  most of the smearing were model K (now in both Quarry and Dark Pictures findings).
+- **Left over: the moving hand ghosts** into stair-stepped copies. It's well past the 90-frame stale-
+  velocity window, so the guard isn't replacing its motion. Ghost copies trailing one moving object
+  point at missing or wrong velocity for that mesh. Verbose log was off again (it isn't saved), so
+  there are no motion statistics.
+- Next: a texture capture during the hand movement (Diagnostics > "Capture DLSS textures": two
+  consecutive frames of colour, velocity, our motion, depth and the DLSS output), analysed with
+  `tools/analyze_capture.py` to see what motion the hand pixels carry.
