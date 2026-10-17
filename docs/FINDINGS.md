@@ -1236,3 +1236,16 @@ is saved (`FullscreenMode=0`). ReShade 6.8 was copied from House of Ashes for th
   DLSS keeps it in history.
 - Next: an A/B at the same moment (the fast sweep) with Stabilise off, and one with model E. If it's
   DLSS, a fix on our side would be a "bias current colour" mask for pixels a moving object has just left.
+
+### A/B at the fast sweep (0.1.3, 2026-10-17 09:48-09:50): model J makes the trail, model E is clean
+
+- **09:48:55, Stabilise off, model J** ("App hint Preset J"): the hand sweeping across the curtain
+  leaves a strong striped trail, one step per frame. So the stabilised-lighting copy isn't the cause.
+- **09:49:51, Stabilise on, model E** ("App hint Preset E"): the same sweep with no trail. The hand is
+  only softened by the game's own motion blur.
+- Conclusion: DLSS model J (transformer) keeps the hand's old colour where it left the dark,
+  low-contrast curtain, which has zero motion. Model K showed the same failure, worse, in The Quarry.
+  The CNN model E rejects that history.
+- **0.1.4:** `src/games.hpp` can give a game its own default model, and The Devil in Me defaults to E.
+  A model saved in ReShade.ini (picked in Advanced) still wins. House of Ashes stays on J. The 0.1.3
+  copy guard and reader logging stay: they're harmless and say where the copy goes in each game.

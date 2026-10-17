@@ -116,6 +116,7 @@ std::string Narrow(const wchar_t* s) {
 
 // Executable identity, for the per-build table the real mod will need.
 const char* g_game = nullptr;  // the kGames entry this executable matches
+unsigned int g_gamePreset = 0;  // its default DLSS model, if it has one
 
 void LogGameInfo() {
     wchar_t path[MAX_PATH];
@@ -128,7 +129,10 @@ void LogGameInfo() {
     const wchar_t* file = wcsrchr(path, L'\\');
     file = file ? file + 1 : path;
     for (const GameInfo& g : kGames)
-        if (_wcsicmp(file, g.exe) == 0) g_game = g.name;
+        if (_wcsicmp(file, g.exe) == 0) {
+            g_game = g.name;
+            g_gamePreset = g.preset;
+        }
     if (g_game)
         Log("game: %s", g_game);
     else
@@ -1618,6 +1622,7 @@ void LoadSettings() {
     if (reshade::get_config_value(nullptr, kConfigSection, "CustomScale", custom) && custom >= 33.0f && custom <= 100.0f)
         g_forcePercentage = custom;
     if (g_quality != kCustomQuality) g_forcePercentage = kQualityModes[g_quality].percentage;
+    if (g_gamePreset) o.preset = g_gamePreset;
     unsigned int preset = o.preset;
     if (reshade::get_config_value(nullptr, kConfigSection, "Preset", preset)) o.preset = preset;
     reshade::get_config_value(nullptr, kConfigSection, "StabiliseLighting", o.clampLightingHistory);

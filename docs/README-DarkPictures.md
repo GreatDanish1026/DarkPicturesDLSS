@@ -46,7 +46,8 @@ Press **Home** in game to open ReShade, then open the **Add-ons** tab and the
 - **Frame generation**: Off, 2x, 3x, 4x or Dynamic. Dynamic picks the smallest multiplier
   that reaches your refresh rate. It needs DLSS Super Resolution on. **Turning it on from
   Off needs a game restart**; changing the mode or turning it off works straight away.
-- **Advanced**: the DLSS model (J is recommended), a custom render scale, and
+- **Advanced**: the DLSS model (J is the default in House of Ashes; E in The Devil in Me,
+  where J leaves trails behind fast hands in dark scenes), a custom render scale, and
   "Stabilise screen-space lighting".
 - **Diagnostics**: for troubleshooting and bug reports only.
 
