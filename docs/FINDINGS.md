@@ -1397,3 +1397,13 @@ Stabilise off).
   one renderer layout. Directive 8020 (probably UE5, not checked) is the only one left out.
 - **Frame generation (user report, 2026-10-17):** works as expected in Little Hope and Man of Medan. All
   four games are now covered for DLSS and frame generation.
+
+## DarkPicturesDLSS 1.0.0 (2026-10-17)
+
+- First release: 0.1.13 plus the README, for House of Ashes, Little Hope, Man of Medan and The Devil in
+  Me, with DLSS Super Resolution, frame generation and all quality modes, DLSS model J by default.
+- Package `bin\release\DarkPicturesDLSS-1.0.0.zip` (36.6 MB): the add-on, nvngx_dlss / nvngx_dlssg
+  310.9.1, Streamline 2.14.1 (five DLLs), README, LICENSE, THIRD_PARTY_NOTICES.txt and the NVIDIA licence
+  texts. DXBC parser tests pass.
+- Tagged `v1.0.0` in the DarkPicturesDLSS repository. In this local checkout the tag is
+  `darkpictures-v1.0.0`, because `v1.0.0` here is QuarryDLSS 1.0.0.

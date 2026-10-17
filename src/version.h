@@ -7,10 +7,10 @@
 #define QDLSS_PRODUCT "DarkPicturesDLSS"  // add-on name, ReShade.ini section, log and dump file prefix
 #define QDLSS_GAMES "The Dark Pictures Anthology"
 #define QDLSS_NGX_PROJECT_ID "6fe9a2b4-ad8f-4788-af08-f181a7c9ee71"
-#define QDLSS_VERSION_MAJOR 0
-#define QDLSS_VERSION_MINOR 1
-#define QDLSS_VERSION_PATCH 13
-#define QDLSS_VERSION "0.1.13"
+#define QDLSS_VERSION_MAJOR 1
+#define QDLSS_VERSION_MINOR 0
+#define QDLSS_VERSION_PATCH 0
+#define QDLSS_VERSION "1.0.0"
 #define QDLSS_RC_FILENAME "DarkPicturesDLSS.addon64"
 #define QDLSS_RC_PRODUCT "DarkPicturesDLSS for The Dark Pictures Anthology"
 #define QDLSS_RC_DESCRIPTION "DarkPicturesDLSS ReShade add-on"

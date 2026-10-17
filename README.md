@@ -6,7 +6,7 @@ DLSS and can add generated frames on top through NVIDIA Streamline. It's the Dar
 build of [QuarryDLSS](https://github.com/GreatDanish1026/The-Quarry---DLSS): same source,
 same Unreal Engine 4.26 renderer.
 
-Version **0.1.13**.
+Version **1.0.0**.
 
 | Game | Status |
 |---|---|
