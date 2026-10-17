@@ -1384,3 +1384,14 @@ Stabilise off).
 - **Every Dark Pictures game is on model J by default again (user's choice).** The per-game E default
   from 0.1.4-0.1.12 is gone; the README says to pick E under Advanced if trails show. The saved
   `Preset` in House of Ashes' and The Devil in Me's ReShade.ini went back to 10.
+
+### First run (0.1.13, 2026-10-17 11:12-11:13): works like the others
+
+- **User report: it worked.** Log: Direct3D 12, recognised as Man of Medan, the same TAAU permutation
+  `6435b4eb8190e22b`, and the same input formats as The Devil in Me (colour R11G11B10F, velocity
+  RGBA16_UNORM, depth R32G8X24, output RGBA16F). DLSS ran 2564x1444 -> 3840x2160 in gameplay and
+  2564x1092 -> 3840x1634 in letterboxed cutscenes, and also at Balanced.
+- Only 4 fallbacks in the whole run, each the "not ready for this size" frame at a new size. Velocity
+  placeholder stretches ran DLSS with camera motion (0.1.11). Frame generation was off.
+- So all four Dark Pictures games (House of Ashes, Little Hope, Man of Medan, The Devil in Me) share
+  one renderer layout. Directive 8020 (UE5) is the only one left out.

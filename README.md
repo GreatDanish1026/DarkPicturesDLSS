@@ -13,14 +13,14 @@ Version **0.1.13**.
 | House of Ashes | Supported: DLSS, frame generation, all quality modes |
 | The Devil in Me | Supported: DLSS, frame generation, all quality modes |
 | Little Hope | Supported: DLSS, frame generation, all quality modes |
-| Man of Medan | Added in 0.1.13; first test run pending |
+| Man of Medan | Supported: DLSS, all quality modes (frame generation not tested yet) |
 
 ## Requirements
 
 - An NVIDIA RTX graphics card and a current driver. Frame generation needs an RTX 40 or 50
   series card; 3x, 4x and Dynamic need an RTX 50 series card.
 - [ReShade](https://reshade.me) **6.8 or newer, the version with full add-on support**.
-- The game running on **DirectX 12** (House of Ashes, The Devil in Me and Little Hope do by default).
+- The game running on **DirectX 12** (all four games do by default).
 - For frame generation: **Hardware-accelerated GPU scheduling** on (Windows Settings >
   System > Display > Graphics).
 
