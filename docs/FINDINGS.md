@@ -1327,3 +1327,21 @@ D3D12). Settings: 3840x2160, `FullscreenMode=0`.
   were no longer there). Copying House of Ashes' `dxgi.dll` (the same version) and `ReShade.ini` over it
   replaced that ini; its 2026-09-19 backup (`ReShade.ini.renodx-dlss5-pre-v4-migration-...bak`) is still
   in the folder.
+
+### First run (0.1.9, 2026-10-17 10:56-10:57): D3D12, DLSS runs, and some shots give no velocity
+
+- **Little Hope runs on Direct3D 12** by default and was recognised. DLSS ran 2564x1444 -> 3840x2160 in
+  gameplay and 2564x1092 -> 3840x1634 in letterboxed cutscenes. The user's settings: model J, Stabilise
+  off, frame generation off. User report: no ghosting or trailing.
+- **One cutscene shot ran without DLSS for 18 s** (10:56:53-10:57:11, ~3000 fallbacks): the game bound a
+  1x1 velocity placeholder on every frame, so the game's own TAAU ran. The Devil in Me showed the same
+  placeholder in long gameplay stretches. UE binds it when nothing in the frame wrote velocity, not
+  only at cuts. DLSS could run there with camera-only motion if the cut check doesn't rely on the
+  placeholder.
+- The screenshot (10:57:12) is 1 s into a new shot with almost no motion, so it doesn't test the
+  model J trail. The J-trail screenshots in The Devil in Me were all taken with frame generation 2x,
+  at 78 real fps. With frame generation off the real frame rate is higher, so each frame moves the
+  hand less, which may be why J looks clean in this setup. Not yet tested side by side.
+- **0.1.10:** "Stabilise screen-space lighting" is off by default in DarkPicturesDLSS (no SSGI/SSR mods
+  for these games, and since 0.1.7 nothing reads the copy there). QuarryDLSS keeps it on. The saved
+  value in House of Ashes' and The Devil in Me's ReShade.ini was set to 0 to match.

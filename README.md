@@ -60,7 +60,7 @@ Press **Home** in game to open ReShade, then open the **Add-ons** tab and the
   says whether it's active. **Turning it on from Off needs a game restart**; changing the
   mode or turning it off works straight away.
 - **Advanced**: the DLSS model (E by default, see Known limits), a custom render scale,
-  and "Stabilise screen-space lighting" (only matters with mods that add screen-space
+  and "Stabilise screen-space lighting" (off by default; only for mods that add screen-space
   lighting).
 - **Diagnostics**: for troubleshooting and bug reports only.
 

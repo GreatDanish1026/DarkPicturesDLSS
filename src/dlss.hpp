@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <string>
 
+#include "version.h"
+
 namespace dlss {
 
 using namespace reshade::api;
@@ -43,7 +45,13 @@ struct Options {
     bool mvJittered = false;  // DLSS feature flag; changing it recreates the feature
     bool invertMotion = false;  // DLSS MV scale -1: tests the motion vector sign
     bool ignoreVelocity = false;  // camera reprojection only: tests the game velocity decode
-    bool clampLightingHistory = true;  // give SSGI/SSR a clamped copy of the DLSS output
+    // Give SSGI/SSR a clamped copy of the DLSS output. For The Quarry's SSGI/SSR pak mods; the
+    // Dark Pictures games have no such mods, and nothing there reads the copy.
+#if defined(QDLSS_DARK_PICTURES)
+    bool clampLightingHistory = false;
+#else
+    bool clampLightingHistory = true;
+#endif
     bool passPreExposure = true;  // tell DLSS the game's per-frame pre-exposure
     bool gameExposure = true;  // give DLSS the game's eye adaptation instead of its auto exposure (recreates)
     // DLSS model preset hint (0 default, 5 E, 10 J, 11 K, 12 L, 13 M); recreates the feature.
