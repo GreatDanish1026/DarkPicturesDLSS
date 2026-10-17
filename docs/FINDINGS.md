@@ -1148,3 +1148,26 @@ is saved (`FullscreenMode=0`). ReShade 6.8 was copied from House of Ashes for th
 - **Not yet covered:** both sessions were short (about 50 s and 40 s), and the verbose motion windows
   (49) all had the camera nearly still (mean under 1 px). Motion vectors in a moving camera and a
   cutscene with cuts still need a longer run.
+
+### Third run (0.1.1, 2026-10-17 07:58-07:59): smearing and stale blocks in a dark cutscene
+
+- **User screenshot 07:59:48** (letterboxed cutscene, 2564x1068 -> 3840x1600): heavy corruption.
+  Hard-edged rectangles show an older image, and a moving hand and a hat are smeared into staircases.
+- **The model is forced to K.** NGX logged "(Quality) Using DRS Overridden Preset K" (M for Perf, L
+  for Ultra Perf) and "Override Reported: ModelPreset, Value: 11, Requested: Yes, Applied: Yes": the
+  NVIDIA App's DLSS model override replaces our J hint. The House of Ashes logs show the same override.
+  That's The Quarry's finding (0.5.22): K over-trusts history when a large near-camera object moves
+  against a dark background, which gives staircase smears. This shot is dark, close-up, with a moving
+  hand. The ReShade screenshot is a real frame (ReShade is above Streamline), so frame generation isn't
+  involved.
+- Other observations from the log:
+  - The TAAU output is the same texture every frame here (`...cc41df0`), not a ping-pong pair as in the
+    other two games.
+  - Long stretches use a 1x1 velocity placeholder in gameplay (about 460 fallbacks in 2.6 s), where the
+    game's own TAA runs.
+  - One burst of "slSetConstants failed: eErrorDuplicatedConstants" at 07:59:49, right before a
+    windowed switch.
+  - Verbose log wasn't on, so there are no motion or brightness statistics for the shot.
+- Next: the same scene with the NVIDIA App's DLSS model override off for The Devil in Me (so J
+  applies), with Verbose log and "Log brightness" on. If it persists, try "Stabilise screen-space
+  lighting" off and "Ignore game velocity" (test) on the same shot.
