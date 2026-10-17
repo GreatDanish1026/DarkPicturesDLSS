@@ -1219,3 +1219,20 @@ is saved (`FullscreenMode=0`). ReShade 6.8 was copied from House of Ashes for th
   - the log names the pass the copy goes in before and any pass that drops it, with the pass index of
     DLSS, on each change (first 20).
 - Next: the same cutscene with "Stabilise screen-space lighting" back on and Verbose log on.
+
+### 0.1.3 run (2026-10-17 09:43-09:45): the ghost is back with the copy on, and the copy can't reach the screen
+
+- **User report and screenshot 09:44:49** (Stabilise on, mid-gesture): the hand leaves a long, striped,
+  translucent trail across the dark curtain, one step per frame. Motion for that gesture is up to ~10 px
+  per frame (09:44:47-49), with the camera still.
+- **The log names the copy's only reader: the TAAU itself** ("goes in before pass #111 CS
+  6435b4eb8190e22b (t5)", its history input), the same pass DLSS replaces. DLSS doesn't read t5 and
+  the game's TAAU is skipped, so the copy isn't on any path to the screen. No pass earlier in the frame
+  reads last frame's output (r.SSGI.Enable 0, and RT reflections replace SSR).
+- **Test A doesn't count as proof:** its screenshot (09:31:33) caught the end of the gesture, with the
+  hand at the left edge and moving slowly, not the fast sweep. The two shots aren't the same moment.
+- So the most likely cause is DLSS on a fast, low-contrast object against a dark static background:
+  the curtain pixels have zero motion, and the hand's old colour is close enough to the curtain's that
+  DLSS keeps it in history.
+- Next: an A/B at the same moment (the fast sweep) with Stabilise off, and one with model E. If it's
+  DLSS, a fix on our side would be a "bias current colour" mask for pixels a moving object has just left.
