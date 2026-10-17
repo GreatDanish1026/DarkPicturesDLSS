@@ -1369,3 +1369,18 @@ D3D12). Settings: 3840x2160, `FullscreenMode=0`.
   a few dozen times. **0.1.12:** the guess also needs a non-empty input and an output of at least a
   quarter of the back buffer. The velocity log line now prints the placeholder size (it printed a
   literal format string).
+
+## The Dark Pictures Anthology: Man of Medan
+
+Man of Medan (Steam app 939850, build 10739751, `SMG019\Binaries\Win64\ManOfMedan-Win64-Shipping.exe`) is
+**UE 4.26** ("UE4+Release-4.26", in UTF-16 only) with the D3D11 and D3D12 RHIs, and no upscaler of its own.
+ReShade 6.8.0.2152 was already set up there (2026-10-16) and was left untouched. Only the add-on and the
+NVIDIA runtime were added, so the add-on starts from its defaults (model J, frame generation off,
+Stabilise off).
+
+### 0.1.13: Man of Medan added; model J the default everywhere
+
+- Man of Medan added to `src/games.hpp` and `build.ps1`.
+- **Every Dark Pictures game is on model J by default again (user's choice).** The per-game E default
+  from 0.1.4-0.1.12 is gone; the README says to pick E under Advanced if trails show. The saved
+  `Preset` in House of Ashes' and The Devil in Me's ReShade.ini went back to 10.

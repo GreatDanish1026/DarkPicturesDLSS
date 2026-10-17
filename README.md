@@ -6,21 +6,21 @@ DLSS and can add generated frames on top through NVIDIA Streamline. It's the Dar
 build of [QuarryDLSS](https://github.com/GreatDanish1026/The-Quarry---DLSS): same source,
 same Unreal Engine 4.26 renderer.
 
-Version **0.1.12**.
+Version **0.1.13**.
 
 | Game | Status |
 |---|---|
 | House of Ashes | Supported: DLSS, frame generation, all quality modes |
 | The Devil in Me | Supported: DLSS, frame generation, all quality modes |
 | Little Hope | Supported: DLSS, frame generation, all quality modes |
-| Man of Medan | Not supported yet |
+| Man of Medan | Added in 0.1.13; first test run pending |
 
 ## Requirements
 
 - An NVIDIA RTX graphics card and a current driver. Frame generation needs an RTX 40 or 50
   series card; 3x, 4x and Dynamic need an RTX 50 series card.
 - [ReShade](https://reshade.me) **6.8 or newer, the version with full add-on support**.
-- The game running on **DirectX 12** (all three supported games do by default).
+- The game running on **DirectX 12** (House of Ashes, The Devil in Me and Little Hope do by default).
 - For frame generation: **Hardware-accelerated GPU scheduling** on (Windows Settings >
   System > Display > Graphics).
 
@@ -34,6 +34,7 @@ Version **0.1.12**.
    | House of Ashes | `SMG025\Binaries\Win64\HouseOfAshes-Win64-Shipping.exe` |
    | The Devil in Me | `SMG028\Binaries\Win64\TheDevilInMe-Win64-Shipping.exe` |
    | Little Hope | `SMG024\Binaries\Win64\LittleHope-Win64-Shipping.exe` |
+   | Man of Medan | `SMG019\Binaries\Win64\ManOfMedan-Win64-Shipping.exe` |
 
 2. Copy **all the files at the top level of the zip** into that same `Win64` folder:
    - `DarkPicturesDLSS.addon64`, the add-on;
@@ -61,7 +62,7 @@ Press **Home** in game to open ReShade, then open the **Add-ons** tab and the
   your refresh rate. Frame generation needs DLSS Super Resolution on; the line under it
   says whether it's active. **Turning it on from Off needs a game restart**; changing the
   mode or turning it off works straight away.
-- **Advanced**: the DLSS model (E by default, see Known limits), a custom render scale,
+- **Advanced**: the DLSS model (J by default, see Known limits), a custom render scale,
   and "Stabilise screen-space lighting" (off by default; only for mods that add screen-space
   lighting).
 - **Diagnostics**: for troubleshooting and bug reports only.
@@ -71,9 +72,10 @@ Settings are saved in `ReShade.ini` under `[DarkPicturesDLSS]`.
 ## Known limits
 
 - DirectX 12 only.
-- The add-on asks for DLSS model **E**. The newer models J and K leave striped trails
-  behind fast-moving hands against dark backgrounds, which these games have a lot of.
-  An NVIDIA App or driver model override for the game replaces that choice.
+- The add-on asks for DLSS model **J**. J can leave faint striped trails behind
+  fast-moving hands against dark backgrounds; if you see them, pick **E** under Advanced.
+  Model K (NVIDIA's default for Quality) is worse there. An NVIDIA App or driver model
+  override for the game replaces the model chosen here.
 - Frame generation pauses for a moment on camera cuts, loading screens, window resizes
   and fullscreen switches, and while DLSS Super Resolution is off.
 - The frame generation model is NVIDIA's default, or the NVIDIA App's frame generation

@@ -14,11 +14,13 @@ struct GameInfo {
 
 #if defined(QDLSS_DARK_PICTURES)
 constexpr GameInfo kGames[] = {
-    // Model E: J leaves striped trails behind fast hands against dark backgrounds, and ignores
-    // DLSS's bias-current-colour mask (FINDINGS.md). Seen in both games.
-    {L"HouseOfAshes-Win64-Shipping.exe", "House of Ashes", 5},   // UE 4.26, SMG025
-    {L"TheDevilInMe-Win64-Shipping.exe", "The Devil in Me", 5},  // UE 4.26, SMG028
-    {L"LittleHope-Win64-Shipping.exe", "Little Hope", 5},        // UE 4.26, SMG024 (D3D11 and D3D12 RHIs)
+    // All on the default model J (0.1.13, the user's choice). E was the default in 0.1.4-0.1.12:
+    // J can leave striped trails behind fast hands against dark backgrounds (FINDINGS.md), which
+    // E doesn't; Advanced still offers E.
+    {L"HouseOfAshes-Win64-Shipping.exe", "House of Ashes"},    // UE 4.26, SMG025
+    {L"TheDevilInMe-Win64-Shipping.exe", "The Devil in Me"},   // UE 4.26, SMG028
+    {L"LittleHope-Win64-Shipping.exe", "Little Hope"},         // UE 4.26, SMG024 (D3D11 and D3D12 RHIs)
+    {L"ManOfMedan-Win64-Shipping.exe", "Man of Medan"},        // UE 4.26, SMG019 (D3D11 and D3D12 RHIs)
 };
 #else
 constexpr GameInfo kGames[] = {
