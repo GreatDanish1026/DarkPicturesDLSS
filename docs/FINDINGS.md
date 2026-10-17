@@ -1130,3 +1130,21 @@ is saved (`FullscreenMode=0`). ReShade 6.8 was copied from House of Ashes for th
   - a format a shader can't decode is refused with a status line instead of a bad view;
   - the output UAV is only created once the output is known to be RGBA16F;
   - the game's four input formats are logged once per change.
+
+### Second run (DarkPicturesDLSS 0.1.1, 2026-10-16 15:45-15:47): no crash
+
+- **User report: no crash.** Input formats as logged: colour 26 (R11G11B10F), velocity 11
+  (RGBA16_UNORM), depth 19 (R32G8X24_TYPELESS), output 10 (RGBA16F). DLSS ran 2564x1444 -> 3840x2160,
+  and the clamp pass now reads the colour through an R11G11B10F view.
+- **Constants (`DarkPicturesDLSS_cbuffers_2610.txt`): same layout again.**
+  - TAAU cb0: row 27 render rect 2564x1444, row 24 output 3840x2160, row 28 jitter (.zw 0.668 / 1.498).
+  - View: rows 28-31 a 16:9 projection (focal 2.333, near 10), row 18 a unit forward vector, row 67
+    the camera origin, rows 122-125 ClipToPrevClip (identity when still), row 126 the jitter, row 135.y
+    pre-exposure 1.414.
+  - The game's cut flag and the camera-jump check agree.
+- **Frame generation 2x:** the swap chain was created through Streamline (from ReShade). DLSS-G went
+  to status ok, paused while DLSS SR wasn't running yet, switched off around the fullscreen switch
+  and resize, and resumed at 2x with the first DLSS frame.
+- **Not yet covered:** both sessions were short (about 50 s and 40 s), and the verbose motion windows
+  (49) all had the camera nearly still (mean under 1 px). Motion vectors in a moving camera and a
+  cutscene with cuts still need a longer run.
