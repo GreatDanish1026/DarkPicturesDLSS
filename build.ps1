@@ -33,10 +33,10 @@ $root = $PSScriptRoot
 # Per product: add-on name, compiler define, README, and the games it installs into
 # (shipping exe names, matching src\games.hpp).
 $products = @{
-    Quarry       = @{ Name = "QuarryDLSS"; Define = ""; Readme = "README.md"
+    Quarry       = @{ Name = "QuarryDLSS"; Define = ""; Readme = "docs\README-Quarry.md"
                       Exes = @("TheQuarry-Win64-Shipping.exe")
                       GameBin = "E:\SteamLibrary\steamapps\common\The Quarry\SMG026\Binaries\Win64" }
-    DarkPictures = @{ Name = "DarkPicturesDLSS"; Define = "QDLSS_DARK_PICTURES"; Readme = "docs\README-DarkPictures.md"
+    DarkPictures = @{ Name = "DarkPicturesDLSS"; Define = "QDLSS_DARK_PICTURES"; Readme = "README.md"
                       Exes = @("HouseOfAshes-Win64-Shipping.exe", "TheDevilInMe-Win64-Shipping.exe")
                       GameBin = "E:\SteamLibrary\steamapps\common\The Dark Pictures Anthology - House of Ashes\SMG025\Binaries\Win64" }
 }
