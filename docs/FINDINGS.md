@@ -1282,3 +1282,17 @@ is saved (`FullscreenMode=0`). ReShade 6.8 was copied from House of Ashes for th
   and masked pixels.
 - Untested. The Devil in Me still defaults to E (0.1.4); to test the mask, pick J in Advanced and
   compare the fast sweep with the box ticked and unticked.
+- **0.1.6 run (2026-10-17 10:12-10:13): J still trails with the mask on.** Settings: preset 10 ("App
+  hint Preset J"), trail mask 1, Stabilise on. During the sweep the mask was active: 1.2-5.0% moving
+  object pixels and 1.0-1.4% masked behind them (10:12:57-13:00). Screenshot 10:12:59 shows the same
+  striped trail. Either J mostly ignores the bias mask, or the mask isn't where the trail is: the
+  stripes stay for the whole sweep (dozens of frames), and the mask only lasts ~4 frames after the hand
+  leaves a pixel.
+- **0.1.7:**
+  - texture captures (Ctrl+F8) include the mask (`mask0/1.bin`, R8, render resolution) when it's on,
+    to check it against the trail;
+  - the mask is off by default until it's shown to help (the ini setting `TrailMask` still applies);
+  - the stabilised-lighting copy no longer goes into the TAAU's own history input. DLSS replaces that
+    dispatch, so the copy now runs only when a real lighting pass reads last frame's output. In The
+    Devil in Me (where that was the only reader) it now does nothing, so the setting doesn't matter
+    there.

@@ -875,6 +875,7 @@ Result Evaluate(const Frame& f) {
         CaptureTexture(cmd, f.velocity, resource_usage::shader_resource_non_pixel, (std::string("velocity") + sfx).c_str());
         CaptureTexture(cmd, g_motion, resource_usage::unordered_access, (std::string("motion") + sfx).c_str());
         CaptureTexture(cmd, g_depth, resource_usage::unordered_access, (std::string("depth") + sfx).c_str());
+        if (trail) CaptureTexture(cmd, g_mask, resource_usage::unordered_access, (std::string("mask") + sfx).c_str());
         char h[1024];
         int n = snprintf(h, sizeof(h),
                          "frame%s %llu age %u\nrender%s %ux%u output %u,%u %ux%u\njitter%s %.6f %.6f\npreexposure%s %.6g\n"

@@ -527,6 +527,8 @@ std::string DumpConstantBuffers(device* dev, const buffer_range* cbs, const Shad
     return s;
 }
 
+bool IsTaau(uint64_t key);
+
 // Which pass the lighting copy lands in front of, and which writes drop it, logged on
 // change (first 20 changes each): it differs between games and decides whether the copy helps.
 uint32_t g_dlssPass = UINT32_MAX;  // pass index of this frame's DLSS evaluate
@@ -604,8 +606,11 @@ void OnPass(command_list* cmd, bool compute, const char* what) {
     if (d3d12) {
         for (const auto& b : out)
             if (dlss::OnGameWrite(b.res, g_frame)) NoteLightingWrite(compute, key, b.slot);
+        // Not into the TAAU's own history input: DLSS replaces that dispatch and never reads it.
+        // In The Devil in Me (no SSGI, RT reflections) that's the only reader, so the copy does
+        // nothing there; it only runs when a lighting pass reads last frame's output.
         for (const auto& b : in)
-            if (dlss::PatchLightingHistory(cmd, b.res, compute, g_frame)) {
+            if (!IsTaau(key) && dlss::PatchLightingHistory(cmd, b.res, compute, g_frame)) {
                 NoteLightingReader(compute, key, b.slot);
                 break;
             }
