@@ -444,7 +444,7 @@ void FinishCapture() {
         }
         const D3D12_RANGE none = {0, 0};
         item.buffer->Unmap(0, &none);
-        char line[200];
+        char line[1024];  // the game path can be long (it cut the line, newline and all, at 200)
         snprintf(line, sizeof(line), "texture %s %ux%u dxgi_format %d bytes_per_row %llu file %s\n", item.name.c_str(),
                  item.footprint.Footprint.Width, item.rows, static_cast<int>(item.format),
                  static_cast<unsigned long long>(item.rowBytes), (base + "_" + item.name + ".bin").c_str());

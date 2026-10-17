@@ -1,4 +1,4 @@
-"""Analyses a QuarryDLSS texture capture (Ctrl+F8 / Ctrl+Shift+F8 in the overlay).
+"""Analyses a QuarryDLSS / DarkPicturesDLSS texture capture (Ctrl+F8 / Ctrl+Shift+F8 in the overlay).
 
 A capture holds two consecutive DLSS frames (suffix 0 and 1; 0.5.18+) or one (no suffix).
 For the last frame it recomputes what dlss_prepare.hlsl does per render pixel: the game's
@@ -19,6 +19,7 @@ Usage: python analyze_capture.py <capture .txt> --out <dir>   (needs numpy and P
 import argparse
 import colorsys
 import os
+import re
 
 import numpy as np
 from PIL import Image
@@ -42,9 +43,11 @@ def read_header(path):
             h["pre" + sfx] = float(parts[1])
         elif base == "clip_to_prev_clip":
             h["c2p" + sfx] = np.array([float(v) for v in parts[1:17]]).reshape(4, 4)
-        elif key == "texture":
-            w, hh = (int(v) for v in parts[2].split("x"))
-            h["textures"][parts[1]] = (w, hh, int(parts[4]), line.split(" file ", 1)[1].strip())
+    # Texture lines: add-ons before 0.1.2 / 1.1.1 cut them off (and their newline) when the
+    # game path is long, so find them anywhere and derive each file name from the header's.
+    base = os.path.splitext(path)[0]
+    for name, w, hh, fmt in re.findall(r"texture (\w+) (\d+)x(\d+) dxgi_format (\d+)", open(path).read()):
+        h["textures"][name] = (int(w), int(hh), int(fmt), f"{base}_{name}.bin")
     return h
 
 
@@ -54,6 +57,23 @@ def load(h, name, dtype, channels, size=None):
     rw, rh = size or h["render"]
     a = a.reshape(hh, w, channels) if channels > 1 else a.reshape(hh, w)
     return a[:rh, :rw]
+
+
+def load_color(h, name, size=None):
+    """RGB as float64, from RGBA16F (DXGI 10) or R11G11B10F (DXGI 26, The Devil in Me)."""
+    fmt = h["textures"][name][2]
+    if fmt == 10:
+        return load(h, name, np.float16, 4, size)[..., :3].astype(np.float64)
+    if fmt != 26:
+        raise SystemExit(f"{name}: colour format DXGI {fmt} not supported")
+    v = load(h, name, np.uint32, 1, size).astype(np.uint64)
+
+    def small_float(bits, mbits):
+        m = (bits & ((1 << mbits) - 1)).astype(np.float64)
+        e = ((bits >> mbits) & 31).astype(np.float64)
+        return np.where(e == 0, m / (1 << mbits) * 2.0 ** -14, 2.0 ** (e - 15) * (1.0 + m / (1 << mbits)))
+
+    return np.stack([small_float(v & 0x7FF, 6), small_float((v >> 11) & 0x7FF, 6), small_float(v >> 22, 5)], axis=-1)
 
 
 def motions(h, sfx):
@@ -126,7 +146,7 @@ def main():
                          f"d({d[:, 0].mean():+.2f},{d[:, 1].mean():+.2f}) c({c[:, 0].mean():+.2f},{c[:, 1].mean():+.2f})")
         print("  " + " | ".join(cells))
 
-    color = load(h, "color" + s, np.float16, 4)[..., :3].astype(np.float64)
+    color = load_color(h, "color" + s)
     tone = lambda c: np.clip(c / (1.0 + c), 0, 1) ** (1 / 2.2)
     Image.fromarray((tone(color) * 255).astype(np.uint8)).save(tag + "_color.png")
     save_gray(tag + "_object.png", has_obj.astype(float))
@@ -139,7 +159,7 @@ def main():
     if pair:
         # Compare in absolute luminance: undo each frame's pre-exposure.
         c1 = color / h["pre1"]
-        c0 = load(h, "color0", np.float16, 4)[..., :3].astype(np.float64) / h["pre0"]
+        c0 = load_color(h, "color0") / h["pre0"]
         lum = lambda c: c @ np.array([0.2126, 0.7152, 0.0722])
         l1, mean = lum(c1), max(lum(c1).mean(), 1e-6)
         ys, xs = np.mgrid[0:rh, 0:rw]

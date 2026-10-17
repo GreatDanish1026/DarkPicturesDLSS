@@ -1185,3 +1185,21 @@ is saved (`FullscreenMode=0`). ReShade 6.8 was copied from House of Ashes for th
 - Next: a texture capture during the hand movement (Diagnostics > "Capture DLSS textures": two
   consecutive frames of colour, velocity, our motion, depth and the DLSS output), analysed with
   `tools/analyze_capture.py` to see what motion the hand pixels carry.
+
+### Capture 6637-6638 (2026-10-17 08:07): the hand's motion vectors are right
+
+- Two consecutive DLSS frames in the same shot (2564x1068 -> 3840x1600, age 1000, pre-exposure 0.19),
+  analysed with `tools/analyze_capture.py`. The tool now decodes R11G11B10F colour and finds texture
+  lines anywhere in the header.
+- **The game's velocity reprojects best**: 0.0706 overall against 0.0761 camera-only, 0.1363 zero and
+  0.1524 inverted, and DLSS received exactly that motion (0.0706). In the region with the hand (bottom
+  row, second column: 41% object pixels, decoded vs camera differ by 1.8 px), the errors are 0.135
+  game, 0.150 camera, 0.242 zero. So the hand has velocity, and it's right.
+- In this captured frame the DLSS output shows the hand clean: the capture caught a slow part of the
+  gesture (motion 2-3 px per frame). The ghosting in the 08:04:01 screenshot comes from the fast part,
+  not from missing motion vectors. Left to tell apart: DLSS's limit on fast thin objects against a dark
+  background, or the stabilised-lighting copy. Next: the same fast gesture captured with Ctrl+F8
+  (Diagnostics > debug hotkeys), and A/B runs with "Stabilise screen-space lighting" off and with
+  model E.
+- **0.1.2:** the capture header's texture lines are no longer cut short by a long game path (the
+  line buffer was 200 characters).
