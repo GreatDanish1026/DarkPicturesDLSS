@@ -6,20 +6,21 @@ DLSS and can add generated frames on top through NVIDIA Streamline. It's the Dar
 build of [QuarryDLSS](https://github.com/GreatDanish1026/The-Quarry---DLSS): same source,
 same Unreal Engine 4.26 renderer.
 
-Version **0.1.8**.
+Version **0.1.12**.
 
 | Game | Status |
 |---|---|
 | House of Ashes | Supported: DLSS, frame generation, all quality modes |
 | The Devil in Me | Supported: DLSS, frame generation, all quality modes |
-| Man of Medan, Little Hope | Not supported yet |
+| Little Hope | Supported: DLSS, frame generation, all quality modes |
+| Man of Medan | Not supported yet |
 
 ## Requirements
 
 - An NVIDIA RTX graphics card and a current driver. Frame generation needs an RTX 40 or 50
   series card; 3x, 4x and Dynamic need an RTX 50 series card.
 - [ReShade](https://reshade.me) **6.8 or newer, the version with full add-on support**.
-- The game running on **DirectX 12** (both supported games do by default).
+- The game running on **DirectX 12** (all three supported games do by default).
 - For frame generation: **Hardware-accelerated GPU scheduling** on (Windows Settings >
   System > Display > Graphics).
 
@@ -32,6 +33,7 @@ Version **0.1.8**.
    |---|---|
    | House of Ashes | `SMG025\Binaries\Win64\HouseOfAshes-Win64-Shipping.exe` |
    | The Devil in Me | `SMG028\Binaries\Win64\TheDevilInMe-Win64-Shipping.exe` |
+   | Little Hope | `SMG024\Binaries\Win64\LittleHope-Win64-Shipping.exe` |
 
 2. Copy **all the files at the top level of the zip** into that same `Win64` folder:
    - `DarkPicturesDLSS.addon64`, the add-on;
