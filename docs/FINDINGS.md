@@ -1296,3 +1296,17 @@ is saved (`FullscreenMode=0`). ReShade 6.8 was copied from House of Ashes for th
     dispatch, so the copy now runs only when a real lighting pass reads last frame's output. In The
     Devil in Me (where that was the only reader) it now does nothing, so the setting doesn't matter
     there.
+
+### Capture 4399-4400 (0.1.7, 2026-10-17 10:20, model J, mask on): J ignores most of the mask
+
+- Captured mid-sweep (motion up to 9.7 px; 0.53% of render pixels masked).
+- **The game's input colour is clean**: the hand with no trail. DLSS makes the trail.
+- **The mask is where it should be**: a band right behind the hand's trailing edges, ~4 frames wide.
+  The trail runs much further back, over pixels the hand left dozens of frames ago.
+- **In masked pixels DLSS keeps the hand's colour anyway.** Output against input luma over the masked
+  pixels in the hand region: 0.042 against 0.026, with 35% clearly brighter (more than 1.5x + 0.002). In
+  unmasked pixels of the same area they match (0.056 / 0.056, 4%). If J honoured the mask, the old colour
+  would be gone 4 frames after the hand left, and the older stripes couldn't survive.
+- **Conclusion: model J barely uses the bias-current-colour mask, so the trail can't be fixed from our
+  side; model E stays The Devil in Me's default.** The mask stays in the code, off by default
+  (`TrailMask`), for a later model or another game.
