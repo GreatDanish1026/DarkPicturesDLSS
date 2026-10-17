@@ -70,8 +70,10 @@ void main(uint2 id : SV_DispatchThreadID)
     const float4 prevClip = mul(float4(screenPos, deviceZ, 1.0), ClipToPrevClip);
     const float2 camera = ToPixels(screenPos - prevClip.xy / prevClip.w);
 
+    // With Flags.x set the Velocity slot may hold another texture (the game bound a 1x1
+    // placeholder, so dlss.cpp binds the depth there): don't read it as velocity.
     const float4 encoded = Velocity[id];
-    const bool hasObject = encoded.x > 0.0;
+    const bool hasObject = Flags.x == 0.0 && encoded.x > 0.0;
     const float2 decoded = hasObject ? ToPixels(DecodeVelocity(encoded)) : float2(0.0, 0.0);
     const bool stale = hasObject && Flags.y > 0.0 && length(decoded - camera) > Flags.y;
     const float2 motion = (hasObject && Flags.x == 0.0 && !stale) ? decoded : camera;

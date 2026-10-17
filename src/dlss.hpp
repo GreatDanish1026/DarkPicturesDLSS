@@ -29,6 +29,7 @@ struct Frame {
     float cameraFwd[3] = {};                   // view forward (row 18)
     uint32_t backBufferW = 0, backBufferH = 0;
     bool reset = false;                        // camera cut (sticky across fallback frames)
+    bool noVelocity = false;                   // the game bound a placeholder: camera motion only
     uint64_t frame = 0;                        // probe frame number, to spot frames DLSS missed
 };
 

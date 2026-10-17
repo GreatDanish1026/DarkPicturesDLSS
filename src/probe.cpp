@@ -1254,14 +1254,28 @@ bool BuildDlssFrame(command_list* cmd, const ContextState& st, dlss::Frame& f, s
     f.backBufferW = g_bbW;
     f.backBufferH = g_bbH;
 
-    // During loading the game binds 1x1 placeholders (e.g. for velocity): every input
-    // must cover the render rect.
+    // Colour and depth must cover the render rect (during loading the game binds 1x1
+    // placeholders). A small velocity texture is UE's placeholder for "nothing wrote velocity
+    // this frame": on camera cuts, but also for whole shots in Little Hope and stretches of
+    // The Devil in Me. DLSS then runs with camera motion only; cuts are caught by the game's
+    // cut flag and the camera-jump check above.
     const auto colorDesc = dev->get_resource_desc(f.color);
     const auto depthDesc = dev->get_resource_desc(f.depth);
     const auto velocityDesc = dev->get_resource_desc(f.velocity);
     const auto outDesc = dev->get_resource_desc(f.output);
-    const uint32_t minW = std::min({colorDesc.texture.width, depthDesc.texture.width, velocityDesc.texture.width});
-    const uint32_t minH = std::min({colorDesc.texture.height, depthDesc.texture.height, velocityDesc.texture.height});
+    const uint32_t minW = std::min(colorDesc.texture.width, depthDesc.texture.width);
+    const uint32_t minH = std::min(colorDesc.texture.height, depthDesc.texture.height);
+    f.noVelocity = velocityDesc.texture.width < f.renderW || velocityDesc.texture.height < f.renderH;
+    {
+        static bool logged = false;
+        static uint32_t changes = 0;
+        if (f.noVelocity != logged && ++changes <= 40) {
+            logged = f.noVelocity;
+            Log("dlss: %s at frame %llu", f.noVelocity ? "no game velocity (placeholder %ux%u): camera motion only"
+                                                       : "game velocity back (%ux%u)",
+                static_cast<unsigned long long>(g_frame), velocityDesc.texture.width, velocityDesc.texture.height);
+        }
+    }
     // Specific reasons, without per-frame values like jitter, so the log only records changes.
     char buf[200];
     if (f.renderW == 0 || f.renderH == 0 || f.outW == 0 || f.outH == 0) {
@@ -1269,9 +1283,9 @@ bool BuildDlssFrame(command_list* cmd, const ContextState& st, dlss::Frame& f, s
     } else if (f.renderW >= f.outW || f.renderH >= f.outH) {
         snprintf(buf, sizeof(buf), "not upscaling (render %ux%u, output %ux%u)", f.renderW, f.renderH, f.outW, f.outH);
     } else if (f.renderW > minW || f.renderH > minH) {
-        snprintf(buf, sizeof(buf), "an input is smaller than the %ux%u render rect (colour %ux%u, depth %ux%u, velocity %ux%u)",
+        snprintf(buf, sizeof(buf), "an input is smaller than the %ux%u render rect (colour %ux%u, depth %ux%u)",
                  f.renderW, f.renderH, colorDesc.texture.width, colorDesc.texture.height, depthDesc.texture.width,
-                 depthDesc.texture.height, velocityDesc.texture.width, velocityDesc.texture.height);
+                 depthDesc.texture.height);
     } else if (f.outX + f.outW > outDesc.texture.width || f.outY + f.outH > outDesc.texture.height) {
         snprintf(buf, sizeof(buf), "output rect %u,%u %ux%u outside the %ux%u output texture", f.outX, f.outY, f.outW,
                  f.outH, outDesc.texture.width, outDesc.texture.height);

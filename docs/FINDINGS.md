@@ -1345,3 +1345,17 @@ D3D12). Settings: 3840x2160, `FullscreenMode=0`.
 - **0.1.10:** "Stabilise screen-space lighting" is off by default in DarkPicturesDLSS (no SSGI/SSR mods
   for these games, and since 0.1.7 nothing reads the copy there). QuarryDLSS keeps it on. The saved
   value in House of Ashes' and The Devil in Me's ReShade.ini was set to 0 to match.
+- **0.1.11 (shared code): DLSS keeps running without game velocity.** When the TAAU's velocity input is
+  smaller than the render rect (UE's 1x1 placeholder), the frame is no longer handed to the game's TAAU:
+  - `Frame::noVelocity` is set, and DLSS runs with camera motion only (ClipToPrevClip, the same as
+    after a cut);
+  - the depth view sets our texture size and sits in the velocity slot, and the prepare pass doesn't
+    read that slot as velocity (`hasObject` needs Flags.x == 0);
+  - cuts still reset DLSS through the game's cut flag and the camera-jump check. They don't depend on
+    the placeholder;
+  - colour and depth must still cover the render rect (loading screens);
+  - the log says when the game's velocity goes away and comes back (first 40 changes), and captures
+    skip the placeholder.
+  Objects that move on their own get no motion vectors in those frames. UE only binds the placeholder
+  when nothing wrote velocity, so there shouldn't be any. To check: the Little Hope cutscene that fell
+  back for 18 s.

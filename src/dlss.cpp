@@ -777,15 +777,17 @@ Result Evaluate(const Frame& f) {
     if (f.reset || switched || gap) g_framesSinceReset = 0;
     const uint32_t age = g_framesSinceReset;
     const bool reset = age <= 1;
-    const bool cameraOnly = g_options.ignoreVelocity || age < kCameraOnlyFrames;
+    const bool cameraOnly = g_options.ignoreVelocity || f.noVelocity || age < kCameraOnlyFrames;
     const float staleThreshold = age < kStaleWindow ? kStaleThreshold : 0.0f;
     if (g_framesSinceReset < 1000) ++g_framesSinceReset;
 
     // Our textures match the game's render-target size; only the render rect is used.
-    const resource_desc velocityDesc = dev->get_resource_desc(f.velocity);
-    const format velocityFormat = VelocityViewFormat(velocityDesc.texture.format);
+    // Without game velocity (a 1x1 placeholder) the depth sets the size and fills the
+    // velocity slot, which the prepare pass then ignores (camera motion only).
+    const resource_desc velocityDesc = dev->get_resource_desc(f.noVelocity ? f.depth : f.velocity);
     const format depthFormat = DepthViewFormat(dev->get_resource_desc(f.depth).texture.format);
-    {
+    const format velocityFormat = f.noVelocity ? depthFormat : VelocityViewFormat(velocityDesc.texture.format);
+    if (!f.noVelocity) {
         // The game's formats, logged once per change (they differ between games).
         static format logged[4] = {};
         const format now[4] = {dev->get_resource_desc(f.color).texture.format, velocityDesc.texture.format,
@@ -802,7 +804,7 @@ Result Evaluate(const Frame& f) {
         return Result::skipped;
     }
     if (!EnsureTextures(dev, velocityDesc.texture.width, velocityDesc.texture.height)) return Result::skipped;
-    const resource_view velocitySrv = GameSrv(dev, f.velocity, velocityFormat);
+    const resource_view velocitySrv = GameSrv(dev, f.noVelocity ? f.depth : f.velocity, velocityFormat);
     const resource_view depthSrv = GameSrv(dev, f.depth, depthFormat);
     if (!velocitySrv.handle || !depthSrv.handle) {
         SetStatus("could not create views of the game's velocity / depth");
@@ -872,7 +874,8 @@ Result Evaluate(const Frame& f) {
         g_captureSecond = !second;
         const char* sfx = second ? "1" : "0";
         CaptureTexture(cmd, f.color, resource_usage::shader_resource_non_pixel, (std::string("color") + sfx).c_str());
-        CaptureTexture(cmd, f.velocity, resource_usage::shader_resource_non_pixel, (std::string("velocity") + sfx).c_str());
+        if (!f.noVelocity)  // not the 1x1 placeholder
+            CaptureTexture(cmd, f.velocity, resource_usage::shader_resource_non_pixel, (std::string("velocity") + sfx).c_str());
         CaptureTexture(cmd, g_motion, resource_usage::unordered_access, (std::string("motion") + sfx).c_str());
         CaptureTexture(cmd, g_depth, resource_usage::unordered_access, (std::string("depth") + sfx).c_str());
         if (trail) CaptureTexture(cmd, g_mask, resource_usage::unordered_access, (std::string("mask") + sfx).c_str());
