@@ -1260,3 +1260,9 @@ is saved (`FullscreenMode=0`). ReShade 6.8 was copied from House of Ashes for th
   (r.MotionBlurQuality 0, test)", forced through the cvar access like the SSGI/SSR switches. They show
   only when the cvar is found. Not saved.
 - Next: model J with depth of field off on the fast sweep; then J with "game exposure" off.
+- **0.1.5 run (2026-10-17 10:02-10:03): depth of field isn't the cause.** r.DepthOfFieldQuality was forced
+  0 (from 2) at 10:02:29 and r.MotionBlurQuality 0 (from 4) at 10:02:31, before the cutscene (10:02:50,
+  model J, "App hint Preset J"). User report: the hand still trails. Game exposure stayed on, so that
+  A/B is still to do.
+- A second ReShade add-on, `DarkPicturesRT.addon64` 0.0.1, was in the game folder for this run (09:51,
+  not from this branch). Its log is a console-variable dump, with nothing that changes rendering.
